@@ -1,5 +1,5 @@
 // src/services/gemini.js
-import { products, formatRupiah } from '../data/products.js'
+import { getAllProducts, formatRupiah } from './productService.js'
 
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
 
@@ -52,6 +52,7 @@ export async function askGemini(userMessage, conversationHistory = []) {
 
   if (!apiKey) throw new Error('GEMINI_API_KEY tidak ditemukan.')
 
+  const products = await getAllProducts()
   const productContext = products
     .map((p) => `- ID ${p.id}: ${p.name} (${formatRupiah(p.price)})`)
     .join('\n')

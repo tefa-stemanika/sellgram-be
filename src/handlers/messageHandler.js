@@ -143,9 +143,12 @@ async function handlePesanDenganProduk(bot, msg, productId, quantity) {
   const { id: chatId } = msg.chat
   const userId = msg.from.id
 
-  const { setOrder, getOrder, resetOrder, generateOrderId, ORDER_STATE } =
-    await import('../services/order.js')
-  const { getProductById, formatRupiah } = await import('../data/products.js')
+  const { setOrder, getOrder, resetOrder, ORDER_STATE } = await import(
+    '../services/order.js'
+  )
+  const { getProductById, formatRupiah } = await import(
+    '../services/productService.js'
+  )
 
   const current = getOrder(userId)
   if (current.state !== ORDER_STATE.IDLE) {
@@ -156,7 +159,7 @@ async function handlePesanDenganProduk(bot, msg, productId, quantity) {
     return
   }
 
-  const product = getProductById(productId)
+  const product = await getProductById(productId)
   if (!product) {
     return handlePesan(bot, msg)
   }

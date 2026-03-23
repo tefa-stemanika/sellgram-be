@@ -1,15 +1,19 @@
 // src/handlers/orderHandler.js
 
-import { products, getProductById, formatRupiah } from '../data/products.js'
+import {
+  getAllProducts,
+  getProductById,
+  formatRupiah,
+} from '../services/productService.js'
+import { saveOrder } from '../services/orderService.js'
 import {
   getOrder,
   setOrder,
   resetOrder,
-  generateOrderId,
   ORDER_STATE,
 } from '../services/order.js'
 
-// Helper: kirim pesan — coba Markdown, fallback plain text
+// Helper: kirim pesan dengan fallback plain text
 async function send(bot, chatId, text) {
   try {
     await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' })
@@ -22,6 +26,13 @@ async function send(bot, chatId, text) {
 
 export async function handleMenu(bot, msg) {
   const chatId = msg.chat.id
+
+  const products = await getAllProducts()
+
+  if (products.length === 0) {
+    await send(bot, chatId, '⚠️ Belum ada produk tersedia saat ini.')
+    return
+  }
 
   let text = '🍽️ *MENU KAMI*\n\n'
   products.forEach((p) => {
@@ -52,6 +63,7 @@ export async function handlePesan(bot, msg) {
 
   setOrder(userId, { state: ORDER_STATE.SELECTING_PRODUCT })
 
+  const products = await getAllProducts()
   let text = '📋 *Pilih produk yang ingin dipesan:*\n\n'
   products.forEach((p) => {
     text += `*${p.id}.* ${p.emoji} ${p.name} — ${formatRupiah(p.price)}\n`
@@ -74,15 +86,25 @@ export async function handleKonfirmasi(bot, msg) {
   }
 
   const { selectedProduct, quantity } = order
-  const total = selectedProduct.price * quantity
-  const orderId = generateOrderId()
-  const now = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })
 
-  const invoice = `✅ *ORDER BERHASIL!*
+  try {
+    // Simpan ke database
+    const savedOrder = await saveOrder({
+      telegramId: msg.from.id,
+      username: msg.from.username,
+      firstName: msg.from.first_name,
+      product: selectedProduct,
+      quantity,
+    })
+
+    const total = selectedProduct.price * quantity
+    const now = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })
+
+    const invoice = `✅ *ORDER BERHASIL!*
 
 📄 *Invoice*
 ━━━━━━━━━━━━━━━━━━━━
-🔖 No. Order: \`${orderId}\`
+🔖 No. Order: \`${savedOrder.orderId}\`
 📅 Waktu: ${now}
 ━━━━━━━━━━━━━━━━━━━━
 ${selectedProduct.emoji} ${selectedProduct.name}
@@ -96,8 +118,12 @@ Pesananmu sedang diproses.
 
 Ketik /menu untuk memesan lagi.`
 
-  await send(bot, chatId, invoice)
-  resetOrder(userId)
+    await send(bot, chatId, invoice)
+    resetOrder(userId)
+  } catch (error) {
+    console.error('[saveOrder error]', error.message)
+    await send(bot, chatId, '⚠️ Gagal menyimpan order. Silakan coba lagi.')
+  }
 }
 
 // ── /batal ───────────────────────────────────────────────────────────────────
@@ -120,7 +146,46 @@ export async function handleBatal(bot, msg) {
   )
 }
 
-// ── Handler input angka saat proses order ────────────────────────────────────
+// ── handleOrderStatus ────────────────────────────────────────────────────────
+
+export async function handleOrderStatus(bot, msg) {
+  const chatId = msg.chat.id
+  const userId = msg.from.id
+  const order = getOrder(userId)
+
+  if (order.state === ORDER_STATE.IDLE) {
+    await send(
+      bot,
+      chatId,
+      'ℹ️ Kamu belum punya order yang sedang berjalan.\n\nKetik /menu untuk melihat produk kami.',
+    )
+    return
+  }
+
+  const stateLabel = {
+    [ORDER_STATE.SELECTING_PRODUCT]: 'Memilih produk',
+    [ORDER_STATE.SELECTING_QTY]: `Memilih jumlah untuk: ${order.selectedProduct?.name || ''}`,
+    [ORDER_STATE.CONFIRMING]: 'Menunggu konfirmasi',
+  }
+
+  let text = `📋 *Status Order Kamu*\n\nStatus: ${stateLabel[order.state] || order.state}\n`
+
+  if (order.selectedProduct) {
+    text += `Produk: ${order.selectedProduct.emoji} ${order.selectedProduct.name}\n`
+    text += `Harga: ${formatRupiah(order.selectedProduct.price)}\n`
+  }
+  if (order.quantity) {
+    text += `Jumlah: ${order.quantity}\n`
+    text += `Total: *${formatRupiah(order.selectedProduct.price * order.quantity)}*\n`
+  }
+  if (order.state === ORDER_STATE.CONFIRMING) {
+    text += `\nKetik /konfirmasi untuk melanjutkan atau /batal untuk membatalkan.`
+  }
+
+  await send(bot, chatId, text)
+}
+
+// ── Handler input angka saat flow order aktif ────────────────────────────────
 
 export async function handleOrderInput(bot, msg) {
   const chatId = msg.chat.id
@@ -133,7 +198,9 @@ export async function handleOrderInput(bot, msg) {
   const num = parseInt(input, 10)
 
   if (order.state === ORDER_STATE.SELECTING_PRODUCT) {
-    if (isNaN(num) || num < 1 || num > products.length) {
+    const products = await getAllProducts()
+
+    if (isNaN(num) || num < 1) {
       await send(
         bot,
         chatId,
@@ -142,12 +209,16 @@ export async function handleOrderInput(bot, msg) {
       return true
     }
 
-    const product = getProductById(num)
+    const product = await getProductById(num)
+    if (!product) {
+      await send(bot, chatId, `⚠️ Produk dengan nomor ${num} tidak ditemukan.`)
+      return true
+    }
+
     setOrder(userId, {
       state: ORDER_STATE.SELECTING_QTY,
       selectedProduct: product,
     })
-
     await send(
       bot,
       chatId,
@@ -194,45 +265,4 @@ Ketik /batal untuk membatalkan`
   }
 
   return false
-}
-
-// ── handleOrderStatus (dipanggil via function calling) ───────────────────────
-
-export async function handleOrderStatus(bot, msg) {
-  const chatId = msg.chat.id
-  const userId = msg.from.id
-  const order = getOrder(userId)
-
-  if (order.state === ORDER_STATE.IDLE) {
-    await send(
-      bot,
-      chatId,
-      'ℹ️ Kamu belum punya order yang sedang berjalan.\n\nKetik /menu untuk melihat produk kami.',
-    )
-    return
-  }
-
-  const stateLabel = {
-    [ORDER_STATE.SELECTING_PRODUCT]: 'Memilih produk',
-    [ORDER_STATE.SELECTING_QTY]: `Memilih jumlah untuk: ${order.selectedProduct?.name || ''}`,
-    [ORDER_STATE.CONFIRMING]: 'Menunggu konfirmasi',
-  }
-
-  let text = `📋 *Status Order Kamu*\n\n`
-  text += `Status: ${stateLabel[order.state] || order.state}\n`
-
-  if (order.selectedProduct) {
-    text += `Produk: ${order.selectedProduct.emoji} ${order.selectedProduct.name}\n`
-    text += `Harga: ${formatRupiah(order.selectedProduct.price)}\n`
-  }
-  if (order.quantity) {
-    text += `Jumlah: ${order.quantity}\n`
-    text += `Total: *${formatRupiah(order.selectedProduct.price * order.quantity)}*\n`
-  }
-
-  if (order.state === ORDER_STATE.CONFIRMING) {
-    text += `\nKetik /konfirmasi untuk melanjutkan atau /batal untuk membatalkan.`
-  }
-
-  await send(bot, chatId, text)
 }
