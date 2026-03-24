@@ -1,5 +1,7 @@
 // src/services/gemini.js
+
 import { getAllProducts, formatRupiah } from './productService.js'
+import { getGeminiApiKey, getGeminiModel } from './configService.js'
 
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
 
@@ -46,13 +48,15 @@ const functionDeclarations = [
   },
 ]
 
-export async function askGemini(userMessage, conversationHistory = []) {
-  const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash'
-  const apiKey = process.env.GEMINI_API_KEY
+export async function askGemini(userMessage, userId, conversationHistory = []) {
+  // Baca dari configService, bukan process.env
+  const apiKey = getGeminiApiKey()
+  const model = getGeminiModel()
 
-  if (!apiKey) throw new Error('GEMINI_API_KEY tidak ditemukan.')
+  if (!apiKey)
+    throw new Error('GEMINI_API_KEY tidak ditemukan di database credentials.')
 
-  const products = await getAllProducts()
+  const products = await getAllProducts(userId)
   const productContext = products
     .map((p) => `- ID ${p.id}: ${p.name} (${formatRupiah(p.price)})`)
     .join('\n')

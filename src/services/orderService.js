@@ -1,4 +1,5 @@
 // src/services/orderService.js
+// Multi-tenant: semua operasi order memerlukan userId.
 
 import prisma from './db.js'
 
@@ -13,6 +14,7 @@ export function generateOrderId() {
  * paymentUrl dan qrString diisi setelah transaksi Midtrans dibuat.
  */
 export async function saveOrder({
+  userId,
   telegramId,
   username,
   firstName,
@@ -24,6 +26,7 @@ export async function saveOrder({
 
   return prisma.order.create({
     data: {
+      userId,
       orderId,
       telegramId: BigInt(telegramId),
       username: username || null,
@@ -45,11 +48,18 @@ export async function saveOrder({
 }
 
 /**
- * Simpan payment URL dan token Midtrans ke order yang sudah ada.
+ * Update payment URL dan token Midtrans ke order yang sudah ada.
  */
-export async function updateOrderPayment(orderId, { paymentUrl, snapToken }) {
+export async function updateOrderPayment(
+  userId,
+  orderId,
+  { paymentUrl, snapToken },
+) {
   return prisma.order.update({
-    where: { orderId },
+    where: {
+      // Gunakan composite unique (userId, orderId)
+      userId_orderId: { userId, orderId },
+    },
     data: {
       paymentUrl,
       midtransOrderId: orderId, // sama dengan orderId kita
@@ -57,18 +67,59 @@ export async function updateOrderPayment(orderId, { paymentUrl, snapToken }) {
   })
 }
 
-export async function getOrdersByUser(telegramId, limit = 5) {
+/**
+ * Ambil riwayat order user berdasarkan telegram ID.
+ * CATATAN: Perlu userId untuk scoping, jadi parameter berubah.
+ */
+export async function getOrdersByTelegramId(userId, telegramId, limit = 5) {
   return prisma.order.findMany({
-    where: { telegramId: BigInt(telegramId) },
+    where: { userId, telegramId: BigInt(telegramId) },
     include: { orderItems: { include: { product: true } } },
     orderBy: { createdAt: 'desc' },
     take: limit,
   })
 }
 
-export async function getOrderByOrderId(orderId) {
+/**
+ * Ambil order berdasarkan order ID (sudah scoped ke user).
+ */
+export async function getOrderByOrderId(userId, orderId) {
   return prisma.order.findUnique({
-    where: { orderId },
+    where: {
+      userId_orderId: { userId, orderId },
+    },
     include: { orderItems: { include: { product: true } } },
+  })
+}
+
+/**
+ * Ambil semua order user (untuk admin dashboard).
+ */
+export async function getAllOrdersForUser(userId, limit = 50) {
+  return prisma.order.findMany({
+    where: { userId },
+    include: { orderItems: { include: { product: true } } },
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+  })
+}
+
+/**
+ * Update status order (dari webhook Midtrans).
+ */
+export async function updateOrderStatus(
+  userId,
+  orderId,
+  status,
+  paidAt = null,
+) {
+  return prisma.order.update({
+    where: {
+      userId_orderId: { userId, orderId },
+    },
+    data: {
+      status,
+      ...(paidAt && { paidAt }),
+    },
   })
 }

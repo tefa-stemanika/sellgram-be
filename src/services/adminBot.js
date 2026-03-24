@@ -1,52 +1,112 @@
 // src/services/adminBot.js
-// Bot Telegram terpisah khusus untuk mengirim notifikasi ke admin.
-// Bot ini hanya MENGIRIM pesan — tidak perlu polling/webhook.
+// Multi-tenant admin bot management — each user dapat admin bot instance sendiri
 
 import TelegramBot from 'node-telegram-bot-api'
 import { formatRupiah } from './productService.js'
-
-let adminBot = null
+import {
+  getAdminBotTokenForUser,
+  getAdminChatIdForUser,
+} from './configService.js'
 
 /**
- * Inisialisasi admin bot. Dipanggil sekali dari index.js.
- * Menggunakan mode { polling: false } karena bot ini hanya kirim pesan, tidak perlu terima.
+ * Map<userId, BotInstance>
+ * Tracks admin bot instances per tenant user
  */
-export function initAdminBot() {
-  const token = process.env.ADMIN_BOT_TOKEN
+const adminBots = new Map()
 
-  if (!token) {
-    console.warn(
-      '⚠️  ADMIN_BOT_TOKEN tidak ditemukan — notifikasi admin dinonaktifkan.',
+let adminBot = null // legacy backwards-compat
+
+/**
+ * Initialize admin bot for a specific user (multi-tenant).
+ * Return: BotInstance atau null jika tidak ada token.
+ */
+export function initAdminBotForUser(userId) {
+  try {
+    const token = getAdminBotTokenForUser(userId)
+
+    if (!token) {
+      console.warn(
+        `⚠️  ADMIN_BOT_TOKEN tidak ditemukan untuk user ${userId} — notifikasi admin dinonaktifkan.`,
+      )
+      return null
+    }
+
+    const botInstance = new TelegramBot(token, { polling: false })
+    adminBots.set(userId, botInstance)
+    console.log(
+      `👮 Admin bot siap untuk user ${userId} (${adminBots.size} total)`,
+    )
+    return botInstance
+  } catch (err) {
+    console.error(
+      `[AdminBot] Gagal init admin bot untuk user ${userId}:`,
+      err.message,
     )
     return null
   }
+}
 
-  adminBot = new TelegramBot(token, { polling: false })
-  console.log('👮 Admin bot siap mengirim notifikasi.')
+/**
+ * Initialize admin bots untuk semua active users.
+ * Dipanggil dari index-m6.js saat startup.
+ */
+export async function initAllAdminBots(userIds) {
+  for (const userId of userIds) {
+    try {
+      initAdminBotForUser(userId)
+    } catch (err) {
+      console.error(`[AdminBot] Gagal init untuk user ${userId}:`, err.message)
+    }
+  }
+  console.log(`✅ Admin bots initialized untuk ${adminBots.size} users`)
+}
+
+/**
+ * Get admin bot instance untuk specific user.
+ */
+export function getAdminBotForUser(userId) {
+  return adminBots.get(userId) || null
+}
+
+/**
+ * Legacy backwards-compat: initialize global admin bot (DEFAULT_USER_ID=1)
+ */
+export function initAdminBot() {
+  const DEFAULT_USER_ID = 1
+  adminBot = initAdminBotForUser(DEFAULT_USER_ID)
   return adminBot
 }
 
 /**
- * Kirim notifikasi order baru (pembayaran sukses) ke admin.
- * @param {object} order - Order dari database (include orderItems.product)
- * @param {object} notification - Payload dari Midtrans webhook
+ * Notify admin tentang order berhasil (multi-tenant version).
+ * userId: pemilik bot (tenant)
  */
-export async function notifyAdminOrderSuccess(order, notification) {
-  if (!adminBot) return
-
-  const adminChatId = process.env.ADMIN_CHAT_ID
-  if (!adminChatId) {
+export async function notifyAdminOrderSuccessForUser(
+  userId,
+  order,
+  notification,
+) {
+  const adminBotInstance = getAdminBotForUser(userId)
+  if (!adminBotInstance) {
     console.warn(
-      '⚠️  ADMIN_CHAT_ID tidak ditemukan — notifikasi admin dilewati.',
+      `[AdminBot] Tidak ada admin bot untuk user ${userId} — skip notifikasi.`,
     )
     return
   }
 
-  const item = order.orderItems[0]
+  const adminChatId = getAdminChatIdForUser(userId)
+  if (!adminChatId) {
+    console.warn(
+      `⚠️  ADMIN_CHAT_ID tidak ditemukan untuk user ${userId} — notifikasi dilewati.`,
+    )
+    return
+  }
+
+  const item = order.orderItems?.[0]
   const paidAt = new Date().toLocaleString('id-ID', {
     timeZone: 'Asia/Jakarta',
   })
-  const paymentMethod = formatPaymentMethod(notification.payment_type)
+  const paymentMethod = formatPaymentMethod(notification?.payment_type)
 
   const text = `🛎️ *ORDER BARU MASUK!*
 
@@ -75,28 +135,38 @@ Telegram ID: \`${order.telegramId}\`
 Segera proses pesanan ini! 🚀`
 
   try {
-    await adminBot.sendMessage(adminChatId, text, { parse_mode: 'Markdown' })
+    await adminBotInstance.sendMessage(adminChatId, text, {
+      parse_mode: 'Markdown',
+    })
     console.log(
-      '[AdminBot] Notifikasi order sukses terkirim ke admin:',
+      `[AdminBot] Notifikasi order sukses terkirim (user ${userId}):`,
       order.orderId,
     )
   } catch (err) {
-    console.error('[AdminBot] Gagal kirim notifikasi ke admin:', err.message)
+    console.error(
+      `[AdminBot] Gagal kirim notifikasi (user ${userId}):`,
+      err.message,
+    )
   }
 }
 
 /**
- * Kirim notifikasi pembayaran gagal ke admin (opsional, untuk monitoring).
- * @param {object} order
+ * Notify admin tentang payment failed (multi-tenant version).
+ * userId: pemilik bot (tenant)
  */
-export async function notifyAdminOrderFailed(order) {
-  if (!adminBot) return
+export async function notifyAdminOrderFailedForUser(userId, order) {
+  const adminBotInstance = getAdminBotForUser(userId)
+  if (!adminBotInstance) {
+    console.warn(
+      `[AdminBot] Tidak ada admin bot untuk user ${userId} — skip notifikasi.`,
+    )
+    return
+  }
 
-  const adminChatId = process.env.ADMIN_CHAT_ID
+  const adminChatId = getAdminChatIdForUser(userId)
   if (!adminChatId) return
 
-  const item = order.orderItems[0]
-
+  const item = order.orderItems?.[0]
   const text = `⚠️ *Pembayaran Gagal/Expired*
 
 🔖 Order: \`${order.orderId}\`
@@ -107,13 +177,36 @@ ${item ? `${item.product.emoji} ${item.product.name} x${item.quantity}` : ''}
 Tidak perlu diproses.`
 
   try {
-    await adminBot.sendMessage(adminChatId, text, { parse_mode: 'Markdown' })
+    await adminBotInstance.sendMessage(adminChatId, text, {
+      parse_mode: 'Markdown',
+    })
+    console.log(
+      `[AdminBot] Notifikasi gagal terkirim (user ${userId}):`,
+      order.orderId,
+    )
   } catch (err) {
-    console.error('[AdminBot] Gagal kirim notif gagal ke admin:', err.message)
+    console.error(
+      `[AdminBot] Gagal kirim notif gagal (user ${userId}):`,
+      err.message,
+    )
   }
 }
 
-// ── Helper ───────────────────────────────────────────────────────────────────
+/**
+ * Legacy backwards-compat: Notify admin order success (DEFAULT_USER_ID=1)
+ */
+export async function notifyAdminOrderSuccess(order, notification) {
+  const DEFAULT_USER_ID = 1
+  return notifyAdminOrderSuccessForUser(DEFAULT_USER_ID, order, notification)
+}
+
+/**
+ * Legacy backwards-compat: Notify admin order failed (DEFAULT_USER_ID=1)
+ */
+export async function notifyAdminOrderFailed(order) {
+  const DEFAULT_USER_ID = 1
+  return notifyAdminOrderFailedForUser(DEFAULT_USER_ID, order)
+}
 
 function formatPaymentMethod(paymentType) {
   const map = {
@@ -122,8 +215,6 @@ function formatPaymentMethod(paymentType) {
     shopeepay: 'ShopeePay',
     bank_transfer: 'Transfer Bank',
     credit_card: 'Kartu Kredit',
-    cstore: 'Minimarket',
-    echannel: 'Mandiri Bill',
   }
   return map[paymentType] || paymentType
 }

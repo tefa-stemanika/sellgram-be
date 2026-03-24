@@ -1,4 +1,5 @@
 // src/webhook.js
+// Multi-tenant webhook server for Midtrans payment notifications
 
 import http from 'http'
 import prisma from './services/db.js'
@@ -8,11 +9,12 @@ import {
   isPaymentFailed,
 } from './services/midtrans.js'
 import {
-  notifyAdminOrderSuccess,
-  notifyAdminOrderFailed,
+  notifyAdminOrderSuccessForUser,
+  notifyAdminOrderFailedForUser,
 } from './services/adminBot.js'
+import { getBotForUser } from './services/botManager.js'
 
-let botInstance = null
+let botInstance = null // legacy backwards-compat
 
 export function setBotInstance(bot) {
   botInstance = bot
@@ -51,7 +53,8 @@ export function startWebhookServer(port = 3000) {
 
           const orderId = notification.order_id
 
-          const order = await prisma.order.findUnique({
+          // ── Query order by orderId using findFirst (not unique alone) ──────────────
+          const order = await prisma.order.findFirst({
             where: { orderId },
             include: { orderItems: { include: { product: true } } },
           })
@@ -63,29 +66,61 @@ export function startWebhookServer(port = 3000) {
             return
           }
 
+          // ── Find tenant user dari order ────────────────────────────────────────
+          const userId = order.userId
+          if (!userId) {
+            console.error('[Webhook] Order tidak memiliki userId:', orderId)
+            res.writeHead(400)
+            res.end('Invalid order: missing userId')
+            return
+          }
+
           if (isPaymentSuccess(notification)) {
             await prisma.order.update({
-              where: { orderId },
+              where: { id: order.id },
               data: { status: 'COMPLETED', paidAt: new Date() },
             })
 
-            console.log('[Webhook] Pembayaran berhasil:', orderId)
+            console.log(
+              '[Webhook] Pembayaran berhasil:',
+              orderId,
+              `(user ${userId})`,
+            )
 
-            // Notifikasi ke user pembeli
-            if (botInstance) await sendPaymentSuccessNotification(order)
+            // ── Get user's bot instance untuk notification ke pembeli ─────────────
+            const userBot = getBotForUser(userId)
+            if (userBot) {
+              await sendPaymentSuccessNotification(userBot, order)
+            } else if (botInstance) {
+              // fallback ke global bot jika user bot tidak ditemukan
+              await sendPaymentSuccessNotification(botInstance, order)
+            }
 
-            // Notifikasi ke admin (bot terpisah)
-            await notifyAdminOrderSuccess(order, notification)
+            // ── Notifikasi ke admin user tersebut ──────────────────────────────────
+            await notifyAdminOrderSuccessForUser(userId, order, notification)
           } else if (isPaymentFailed(notification)) {
             await prisma.order.update({
-              where: { orderId },
+              where: { id: order.id },
               data: { status: 'PAYMENT_FAILED' },
             })
 
-            console.log('[Webhook] Pembayaran gagal/expired:', orderId)
+            console.log(
+              '[Webhook] Pembayaran gagal/expired:',
+              orderId,
+              `(user ${userId})`,
+            )
 
-            if (botInstance) await sendPaymentFailedNotification(order)
-            await notifyAdminOrderFailed(order)
+            // ── Get user's bot instance untuk notification ke pembeli ─────────────
+            const userBot = getBotForUser(userId)
+            if (userBot) {
+              await sendPaymentFailedNotification(userBot, order)
+            } else if (botInstance) {
+              // fallback ke global bot
+              await sendPaymentFailedNotification(botInstance, order)
+            }
+
+            // ── Notifikasi ke admin user tersebut ──────────────────────────────────
+            await notifyAdminOrderFailedForUser(userId, order)
           }
 
           res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -113,9 +148,9 @@ export function startWebhookServer(port = 3000) {
   return server
 }
 
-async function sendPaymentSuccessNotification(order) {
+async function sendPaymentSuccessNotification(bot, order) {
   const telegramId = Number(order.telegramId)
-  const item = order.orderItems[0]
+  const item = order.orderItems?.[0]
 
   const text = `✅ *Pembayaran Berhasil!*
 
@@ -126,13 +161,13 @@ ${item ? `${item.product.emoji} ${item.product.name} x${item.quantity}` : ''}
 Terima kasih! Pesananmu sedang kami proses. 🙏`
 
   try {
-    await botInstance.sendMessage(telegramId, text, { parse_mode: 'Markdown' })
+    await bot.sendMessage(telegramId, text, { parse_mode: 'Markdown' })
   } catch (err) {
     console.error('[Webhook] Gagal kirim notif user:', err.message)
   }
 }
 
-async function sendPaymentFailedNotification(order) {
+async function sendPaymentFailedNotification(bot, order) {
   const telegramId = Number(order.telegramId)
 
   const text = `❌ *Pembayaran Gagal/Expired*
@@ -143,7 +178,7 @@ Pembayaran tidak berhasil atau sudah kadaluarsa.
 Ketik /pesan untuk membuat order baru.`
 
   try {
-    await botInstance.sendMessage(telegramId, text, { parse_mode: 'Markdown' })
+    await bot.sendMessage(telegramId, text, { parse_mode: 'Markdown' })
   } catch (err) {
     console.error('[Webhook] Gagal kirim notif gagal user:', err.message)
   }

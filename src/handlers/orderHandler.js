@@ -1,4 +1,5 @@
 // src/handlers/orderHandler.js
+// Multi-tenant order handler — mendukung multiple users dengan state terpisah
 
 import {
   getAllProducts,
@@ -24,9 +25,9 @@ async function send(bot, chatId, text) {
 
 // ── /menu ────────────────────────────────────────────────────────────────────
 
-export async function handleMenu(bot, msg) {
+export async function handleMenu(bot, msg, userId) {
   const chatId = msg.chat.id
-  const products = await getAllProducts()
+  const products = await getAllProducts(userId)
 
   if (products.length === 0) {
     await send(bot, chatId, '⚠️ Belum ada produk tersedia saat ini.')
@@ -45,11 +46,11 @@ export async function handleMenu(bot, msg) {
 
 // ── /pesan ───────────────────────────────────────────────────────────────────
 
-export async function handlePesan(bot, msg) {
+export async function handlePesan(bot, msg, userId) {
   const chatId = msg.chat.id
-  const userId = msg.from.id
+  const telegramId = msg.from.id
 
-  const current = getOrder(userId)
+  const current = getOrder(userId, telegramId)
   if (current.state !== ORDER_STATE.IDLE) {
     await send(
       bot,
@@ -59,9 +60,9 @@ export async function handlePesan(bot, msg) {
     return
   }
 
-  setOrder(userId, { state: ORDER_STATE.SELECTING_PRODUCT })
+  setOrder(userId, telegramId, { state: ORDER_STATE.SELECTING_PRODUCT })
 
-  const products = await getAllProducts()
+  const products = await getAllProducts(userId)
   let text = '📋 *Pilih produk yang ingin dipesan:*\n\n'
   products.forEach((p) => {
     text += `*${p.id}.* ${p.emoji} ${p.name} — ${formatRupiah(p.price)}\n`
@@ -72,10 +73,10 @@ export async function handlePesan(bot, msg) {
 
 // ── /konfirmasi ──────────────────────────────────────────────────────────────
 
-export async function handleKonfirmasi(bot, msg) {
+export async function handleKonfirmasi(bot, msg, userId) {
   const chatId = msg.chat.id
-  const userId = msg.from.id
-  const order = getOrder(userId)
+  const telegramId = msg.from.id
+  const order = getOrder(userId, telegramId)
 
   if (order.state !== ORDER_STATE.CONFIRMING) {
     await send(bot, chatId, '⚠️ Tidak ada order yang perlu dikonfirmasi.')
@@ -89,9 +90,10 @@ export async function handleKonfirmasi(bot, msg) {
   await send(bot, chatId, '⏳ Memproses order dan membuat link pembayaran...')
 
   try {
-    // 1. Simpan order ke database
+    // 1. Simpan order ke database dengan userId
     const savedOrder = await saveOrder({
-      telegramId: msg.from.id,
+      userId,
+      telegramId,
       username: msg.from.username,
       firstName: msg.from.first_name,
       product: selectedProduct,
@@ -107,14 +109,14 @@ export async function handleKonfirmasi(bot, msg) {
       customer: { firstName: msg.from.first_name },
     })
 
-    // 3. Simpan payment URL ke database
-    await updateOrderPayment(savedOrder.orderId, {
+    // 3. Simpan payment URL ke database (scoped dengan userId)
+    await updateOrderPayment(userId, savedOrder.orderId, {
       paymentUrl: snapResult.redirect_url,
       snapToken: snapResult.token,
     })
 
     // 4. Reset state order user (selesai dari flow)
-    resetOrder(userId)
+    resetOrder(userId, telegramId)
 
     // 5. Kirim invoice + link pembayaran ke user
     const total = selectedProduct.price * quantity
@@ -150,16 +152,16 @@ Kamu akan otomatis mendapat notifikasi setelah pembayaran berhasil.`
 
 // ── /batal ───────────────────────────────────────────────────────────────────
 
-export async function handleBatal(bot, msg) {
+export async function handleBatal(bot, msg, userId) {
   const chatId = msg.chat.id
-  const userId = msg.from.id
+  const telegramId = msg.from.id
 
-  if (getOrder(userId).state === ORDER_STATE.IDLE) {
+  if (getOrder(userId, telegramId).state === ORDER_STATE.IDLE) {
     await send(bot, chatId, 'ℹ️ Tidak ada order yang sedang berjalan.')
     return
   }
 
-  resetOrder(userId)
+  resetOrder(userId, telegramId)
   await send(
     bot,
     chatId,
@@ -169,10 +171,10 @@ export async function handleBatal(bot, msg) {
 
 // ── handleOrderStatus ─────────────────────────────────────────────────────────
 
-export async function handleOrderStatus(bot, msg) {
+export async function handleOrderStatus(bot, msg, userId) {
   const chatId = msg.chat.id
-  const userId = msg.from.id
-  const order = getOrder(userId)
+  const telegramId = msg.from.id
+  const order = getOrder(userId, telegramId)
 
   if (order.state === ORDER_STATE.IDLE) {
     await send(
@@ -209,10 +211,10 @@ export async function handleOrderStatus(bot, msg) {
 
 // ── handleOrderInput (flow angka) ─────────────────────────────────────────────
 
-export async function handleOrderInput(bot, msg) {
+export async function handleOrderInput(bot, msg, userId) {
   const chatId = msg.chat.id
-  const userId = msg.from.id
-  const order = getOrder(userId)
+  const telegramId = msg.from.id
+  const order = getOrder(userId, telegramId)
   const input = msg.text?.trim()
 
   if (order.state === ORDER_STATE.IDLE) return false
@@ -220,7 +222,7 @@ export async function handleOrderInput(bot, msg) {
   const num = parseInt(input, 10)
 
   if (order.state === ORDER_STATE.SELECTING_PRODUCT) {
-    const products = await getAllProducts()
+    const products = await getAllProducts(userId)
     if (isNaN(num) || num < 1) {
       await send(
         bot,
@@ -229,12 +231,12 @@ export async function handleOrderInput(bot, msg) {
       )
       return true
     }
-    const product = await getProductById(num)
+    const product = await getProductById(userId, num)
     if (!product) {
       await send(bot, chatId, `⚠️ Produk nomor ${num} tidak ditemukan.`)
       return true
     }
-    setOrder(userId, {
+    setOrder(userId, telegramId, {
       state: ORDER_STATE.SELECTING_QTY,
       selectedProduct: product,
     })
@@ -256,7 +258,10 @@ export async function handleOrderInput(bot, msg) {
       return true
     }
     const { selectedProduct } = order
-    setOrder(userId, { state: ORDER_STATE.CONFIRMING, quantity: num })
+    setOrder(userId, telegramId, {
+      state: ORDER_STATE.CONFIRMING,
+      quantity: num,
+    })
 
     const summary = `📝 *Ringkasan Order*
 

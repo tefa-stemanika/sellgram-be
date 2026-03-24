@@ -6,10 +6,14 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
+    "start:m6": "node src/index-m6.js",
     "dev": "node --watch src/index.js",
+    "dev:m6": "node --watch src/index-m6.js",
     "db:migrate": "npx prisma migrate dev",
     "db:push": "npx prisma db push",
     "db:seed": "node prisma/seed.js",
+    "db:seed-config": "node prisma/seed-config.js",
+    "db:seed-migration-m6": "node prisma/seed-migration-m6.js",
     "db:studio": "npx prisma studio",
     "db:generate": "npx prisma generate"
   },
@@ -18,6 +22,7 @@
   },
   "dependencies": {
     "@prisma/client": "^5.14.0",
+    "bcrypt": "^5.1.1",
     "dotenv": "^16.4.5",
     "node-telegram-bot-api": "^0.66.0"
   },
