@@ -38,28 +38,66 @@ Pastikan sudah terinstall di komputer kamu:
 ## 📁 Struktur Project
 
 ```
-telegram-ai-bot/
-├── prisma/
-│   ├── schema.prisma        # Definisi tabel database
-│   └── seed.js              # Data produk awal
-├── src/
-│   ├── index.js             # Entry point — jalankan semua service
-│   ├── webhook.js           # HTTP server untuk notifikasi Midtrans
-│   ├── handlers/
-│   │   ├── messageHandler.js  # Handler chat AI & command
-│   │   └── orderHandler.js    # Handler flow order (/menu, /pesan, dll)
-│   └── services/
-│       ├── adminBot.js        # Bot admin — kirim notifikasi ke pemilik toko
-│       ├── db.js              # Prisma client singleton
-│       ├── gemini.js          # Integrasi Google Gemini AI
-│       ├── midtrans.js        # Integrasi Midtrans payment
-│       ├── order.js           # State machine order per user (in-memory)
-│       ├── orderService.js    # Query database untuk orders
-│       ├── productService.js  # Query database untuk products
-│       └── session.js         # Riwayat chat per user (in-memory)
-├── .env.example             # Template environment variables
-├── package.json
-└── README.md
+telegram-ai-bot
+├─ ARCHITECTURE.md
+├─ DEPLOYMENT_CHECKLIST.md
+├─ FIX_SUMMARY.md
+├─ M6_CHECKLIST.md
+├─ M6_IMPLEMENTATION_GUIDE.md
+├─ M6_IMPLEMENTATION_SUMMARY.md
+├─ M6_NEXT_STEPS.md
+├─ M6_PHASE3_WEBHOOK_ADMIN.md
+├─ M6_PHASE4_STATE_MANAGEMENT.md
+├─ PHASE5_INTEGRATION_TESTING.md
+├─ PHASE5_SUMMARY.md
+├─ PLAN.md
+├─ README2.md
+├─ WEBHOOK_ERROR_FIX.md
+├─ package.json
+├─ prisma
+│  ├─ DATABASE.md
+│  ├─ schema.prisma
+│  ├─ seed-config.js
+│  ├─ seed-migration-m6.js
+│  └─ seed.js
+├─ src
+│  ├─ data
+│  │  └─ products.js
+│  ├─ handlers
+│  │  ├─ HANDLERS.md
+│  │  ├─ buttonHandler.js
+│  │  ├─ index.js
+│  │  ├─ messageHandler.js
+│  │  └─ orderHandler.js
+│  ├─ index-m6.js
+│  ├─ index.js
+│  ├─ services
+│  │  ├─ SERVICES.md
+│  │  ├─ adminBot.js
+│  │  ├─ botManager.js
+│  │  ├─ configService.js
+│  │  ├─ db.js
+│  │  ├─ gemini.js
+│  │  ├─ midtrans.js
+│  │  ├─ order.js
+│  │  ├─ orderService.js
+│  │  ├─ productService.js
+│  │  ├─ session.js
+│  │  ├─ tenantResolver.js
+│  │  └─ userService.js
+│  ├─ utils
+│  │  ├─ encryption.js
+│  │  └─ password.js
+│  └─ webhook.js
+├─ tests
+│  ├─ integration-tests.js
+│  ├─ load-tests.js
+│  ├─ test-helpers.js
+│  ├─ test-phase4.js
+│  └─ webhook-tests.js
+├─ troubleshoot-telegram.js
+├─ validate-phase2.js
+└─ validate-phase3.js
 ```
 
 ---
@@ -532,3 +570,67 @@ Untuk URL permanen, gunakan ngrok plan berbayar atau deploy ke VPS.
 - **Riwayat chat AI** disimpan di memory — hilang saat bot restart. Untuk production gunakan Redis
 - **URL ngrok berubah** setiap restart — update selalu di Midtrans Dashboard
 - **Untuk production**, ganti `MIDTRANS_IS_PRODUCTION=true` dan gunakan key production Midtrans
+
+```
+telegram-ai-bot
+├─ ARCHITECTURE.md
+├─ DEPLOYMENT_CHECKLIST.md
+├─ FIX_SUMMARY.md
+├─ M6_CHECKLIST.md
+├─ M6_IMPLEMENTATION_GUIDE.md
+├─ M6_IMPLEMENTATION_SUMMARY.md
+├─ M6_NEXT_STEPS.md
+├─ M6_PHASE3_WEBHOOK_ADMIN.md
+├─ M6_PHASE4_STATE_MANAGEMENT.md
+├─ PHASE5_INTEGRATION_TESTING.md
+├─ PHASE5_SUMMARY.md
+├─ PLAN.md
+├─ README.md
+├─ WEBHOOK_ERROR_FIX.md
+├─ package.json
+├─ prisma
+│  ├─ DATABASE.md
+│  ├─ schema.prisma
+│  ├─ seed-config.js
+│  ├─ seed-migration-m6.js
+│  └─ seed.js
+├─ src
+│  ├─ data
+│  │  └─ products.js
+│  ├─ handlers
+│  │  ├─ HANDLERS.md
+│  │  ├─ buttonHandler.js
+│  │  ├─ index.js
+│  │  ├─ messageHandler.js
+│  │  └─ orderHandler.js
+│  ├─ index-m6.js
+│  ├─ index.js
+│  ├─ services
+│  │  ├─ SERVICES.md
+│  │  ├─ adminBot.js
+│  │  ├─ botManager.js
+│  │  ├─ configService.js
+│  │  ├─ db.js
+│  │  ├─ gemini.js
+│  │  ├─ midtrans.js
+│  │  ├─ order.js
+│  │  ├─ orderService.js
+│  │  ├─ productService.js
+│  │  ├─ session.js
+│  │  ├─ tenantResolver.js
+│  │  └─ userService.js
+│  ├─ utils
+│  │  ├─ encryption.js
+│  │  └─ password.js
+│  └─ webhook.js
+├─ tests
+│  ├─ integration-tests.js
+│  ├─ load-tests.js
+│  ├─ test-helpers.js
+│  ├─ test-phase4.js
+│  └─ webhook-tests.js
+├─ troubleshoot-telegram.js
+├─ validate-phase2.js
+└─ validate-phase3.js
+
+```

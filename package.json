@@ -15,7 +15,11 @@
     "db:seed-config": "node prisma/seed-config.js",
     "db:seed-migration-m6": "node prisma/seed-migration-m6.js",
     "db:studio": "npx prisma studio",
-    "db:generate": "npx prisma generate"
+    "db:generate": "npx prisma generate",
+    "test:integration": "node tests/integration-tests.js",
+    "test:webhook": "node tests/webhook-tests.js",
+    "test:load": "node tests/load-tests.js",
+    "test:phase5": "npm run test:integration && npm run test:webhook && npm run test:load"
   },
   "prisma": {
     "seed": "node prisma/seed.js"

@@ -34,6 +34,7 @@ export async function spawnBotForUser(userId, options = {}) {
     // Load config user
     const config = await loadConfigForUser(userId)
     if (!config) {
+      console.error({ config })
       console.error(`❌ Config tidak ditemukan untuk user ${userId}.`)
       return null
     }
