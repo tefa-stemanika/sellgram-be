@@ -1,103 +1,69 @@
 // src/index.js
+// Entry point untuk MULTI-TENANT (M6) mode.
+// Spawn bot instances untuk setiap user active, masing-masing dengan context userId.
+//
+// Jalankan: BOT_MODE=polling NODE_ENV=development node src/index.js
+
 import 'dotenv/config'
-import TelegramBot from 'node-telegram-bot-api'
+import { createApp } from './app.js'
 
-// ── 1. Load config dari database SEBELUM import handler lain ─────────────────
-// Handler mengambil AI_ENABLED saat module di-load, jadi config harus
-// sudah tersedia di memory sebelum import mereka terjadi.
-import { loadConfig, getTelegramToken } from './services/configService.js'
+// ── 0. Init tenant resolver dulu (mapping token→userId) ──────────────────────
+import { initializeTenantMap } from './services/tenantResolver.js'
+await initializeTenantMap()
 
-// Load config — jika gagal (DB tidak ada config), proses berhenti
-await loadConfig()
-
-// ── 2. Import handler setelah config siap ─────────────────────────────────────
+// ── 1. Spawn semua bot instances untuk user yang active ────────────────────────
 import {
-  handleStart,
-  handleHelp,
-  handleReset,
-  handleMessage,
-  AI_ENABLED,
-} from './handlers/messageHandler.js'
-import {
-  handleMenu,
-  handlePesan,
-  handleKonfirmasi,
-  handleBatal,
-} from './handlers/orderHandler.js'
-import {
-  handleCallbackQuery,
-  showMenuButtons,
-} from './handlers/buttonHandler.js'
-import { startWebhookServer, setBotInstance } from './webhook.js'
-import { initAdminBot } from './services/adminBot.js'
+  spawnAllActiveBots,
+  stopAllBots,
+  getBotsStatistics,
+  getActiveBots,
+} from './services/botManager.js'
 
-// ── 3. Validasi token ─────────────────────────────────────────────────────────
-const TELEGRAM_BOT_TOKEN = getTelegramToken()
-if (!TELEGRAM_BOT_TOKEN) {
-  console.error(
-    '❌ TELEGRAM_BOT_TOKEN tidak ditemukan di database credentials.',
-  )
-  console.error('   Jalankan: npm run db:seed-config')
-  process.exit(1)
+// ── 1b. Import handler registration ─────────────────────────────────────────────
+import { registerHandlersForAllBots } from './handlers/index.js'
+
+console.log('🚀 Telegram AI Bot — Multi-Tenant Mode (M6)\n')
+await spawnAllActiveBots()
+
+// ── 1c. Register handlers untuk semua active bots ────────────────────────────────
+const activeBots = getActiveBots()
+registerHandlersForAllBots(activeBots)
+
+// ── 1d. Initialize admin bots untuk notifikasi order ─────────────────────────────
+import { initAllAdminBots } from './services/adminBot.js'
+const activeUserIds = Array.from(activeBots.keys())
+if (activeUserIds.length > 0) {
+  await initAllAdminBots(activeUserIds)
+} else {
+  console.warn('⚠️  Tidak ada active users — admin bots tidak diinisialisasi.')
 }
 
-// ── 4. Inisialisasi bot & services ────────────────────────────────────────────
-const isPolling = process.env.BOT_MODE !== 'webhook'
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: isPolling })
-
-setBotInstance(bot)
-initAdminBot()
-
+// ── 2. Start API server (health, webhook, dashboard API) ──────────────────────
 const port = parseInt(process.env.WEBHOOK_PORT || '3000')
-startWebhookServer(port)
-
-console.log('🤖 Bot Telegram dimulai...')
-console.log(`📡 Mode:    ${isPolling ? 'Polling' : 'Webhook'}`)
-console.log(`🧠 AI Mode: ${AI_ENABLED ? 'ON (Gemini)' : 'OFF (Button UI)'}`)
-
-// ── 5. Command Handler ────────────────────────────────────────────────────────
-bot.onText(/\/start/, (msg) => handleStart(bot, msg))
-bot.onText(/\/help/, (msg) => handleHelp(bot, msg))
-bot.onText(/\/reset/, (msg) => handleReset(bot, msg))
-
-bot.onText(/\/menu/, (msg) => {
-  if (AI_ENABLED) return handleMenu(bot, msg)
-  return showMenuButtons(bot, msg.chat.id)
+const app = createApp()
+app.listen(port, () => {
+  console.log(`🌐 API server berjalan di http://localhost:${port}`)
+  console.log(`   API root: http://localhost:${port}/api`)
+  console.log(`   Health check: http://localhost:${port}/api/health`)
+  console.log(
+    `   Endpoint Midtrans: http://localhost:${port}/api/webhook/midtrans`,
+  )
 })
 
-bot.onText(/\/pesan/, (msg) => {
-  if (AI_ENABLED) handlePesan(bot, msg)
-})
-bot.onText(/\/konfirmasi/, (msg) => {
-  if (AI_ENABLED) handleKonfirmasi(bot, msg)
-})
-bot.onText(/\/batal/, (msg) => handleBatal(bot, msg))
+// ── 3. Periodic check: monitoring bot status ────────────────────────────────────
+setInterval(() => {
+  const stats = getBotsStatistics()
+  console.log(`📊 Active bots: ${stats.totalActiveBots}`)
+}, 60000) // log setiap 1 menit
 
-// ── 6. Callback Query (Inline Keyboard) ──────────────────────────────────────
-bot.on('callback_query', (query) => {
-  if (query.data === 'show_help') {
-    bot.answerCallbackQuery(query.id)
-    return handleHelp(bot, query.message)
-  }
-  return handleCallbackQuery(bot, query)
-})
-
-// ── 7. Semua pesan teks ───────────────────────────────────────────────────────
-bot.on('message', (msg) => {
-  if (msg.text && !msg.text.startsWith('/')) handleMessage(bot, msg)
-})
-
-// ── 8. Error Handling ─────────────────────────────────────────────────────────
-bot.on('polling_error', (err) =>
-  console.error('❌ Polling error:', err.message),
-)
-bot.on('error', (err) => console.error('❌ Bot error:', err.message))
-process.on('uncaughtException', (err) => console.error('❌ Uncaught:', err))
-process.on('unhandledRejection', (err) => console.error('❌ Unhandled:', err))
+// ── 4. Graceful shutdown ────────────────────────────────────────────────────────
 process.on('SIGINT', async () => {
-  console.log('\n⏹️  Menghentikan bot...')
-  if (isPolling) await bot.stopPolling()
+  console.log('\n⏹️  Menghentikan semua bot instances...')
+  await stopAllBots()
   process.exit(0)
 })
 
-console.log('✅ Bot siap menerima pesan!')
+process.on('uncaughtException', (err) => console.error('❌ Uncaught:', err))
+process.on('unhandledRejection', (err) => console.error('❌ Unhandled:', err))
+
+console.log('✅ Multi-tenant bot system ready!')
