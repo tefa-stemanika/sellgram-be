@@ -5,6 +5,7 @@
 import { PrismaClient } from '@prisma/client'
 
 const prisma = new PrismaClient()
+const DEFAULT_SEED_USER_EMAIL = 'seed-owner@localhost.local'
 
 const seedProducts = [
   {
@@ -42,16 +43,40 @@ const seedProducts = [
 async function main() {
   console.log('🌱 Seeding products...')
 
+  const user = await prisma.user.upsert({
+    where: { email: DEFAULT_SEED_USER_EMAIL },
+    update: { isActive: true },
+    create: {
+      email: DEFAULT_SEED_USER_EMAIL,
+      passwordHash: 'seed-password-hash',
+      name: 'Seed Store Owner',
+      plan: 'PRO',
+      isActive: true,
+    },
+  })
+
   for (const product of seedProducts) {
-    await prisma.product.upsert({
-      where: { id: seedProducts.indexOf(product) + 1 },
-      update: product,
-      create: product,
+    const existing = await prisma.product.findFirst({
+      where: { userId: user.id, name: product.name },
+    })
+
+    if (existing) {
+      await prisma.product.update({
+        where: { id: existing.id },
+        data: product,
+      })
+      continue
+    }
+
+    await prisma.product.create({
+      data: { userId: user.id, ...product, isAvailable: true },
     })
   }
 
-  const count = await prisma.product.count()
-  console.log(`✅ Selesai — ${count} produk tersimpan di database.`)
+  const count = await prisma.product.count({ where: { userId: user.id } })
+  console.log(
+    `✅ Selesai — ${count} produk tersimpan untuk user ${DEFAULT_SEED_USER_EMAIL}.`,
+  )
 }
 
 main()

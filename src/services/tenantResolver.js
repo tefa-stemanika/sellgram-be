@@ -42,7 +42,7 @@ export async function initializeTenantMap() {
 
     mapInitialized = true
     console.log(
-      `✅ Tenant map diinisialisasi (${tokenUserMap.size} bot active)`,
+      `✅ Tenant map diinisialisasi (${tokenUserMap.size} token bot terdaftar)`,
     )
     return true
   } catch (err) {

@@ -1,6 +1,9 @@
 import prisma from '../../services/db.js'
 import { encrypt } from '../../utils/encryption.js'
-import { reloadConfigForUser } from '../../services/configService.js'
+import {
+  getTelegramTokenForUser,
+  reloadConfigForUser,
+} from '../../services/configService.js'
 import { refreshTenantMap } from '../../services/tenantResolver.js'
 import {
   isBotActive,
@@ -16,30 +19,63 @@ function maskCredential(value) {
   return '***encrypted***'
 }
 
-async function refreshRuntimeIfNeeded(userId, key) {
-  await reloadConfigForUser(userId)
+function normalizeCredentialKey(key) {
+  return String(key || '').trim().toUpperCase()
+}
 
-  if (key === 'TELEGRAM_BOT_TOKEN') {
-    await refreshTenantMap()
+async function syncMainBotRuntime(userId) {
+  const token = getTelegramTokenForUser(userId)
 
+  // Jika token belum ada/hilang, bot tidak bisa aktif.
+  if (!token) {
     if (isBotActive(userId)) {
-      await restartBotForUser(userId)
-    } else {
-      await spawnBotForUser(userId)
+      await stopBotForUser(userId)
     }
+    return
   }
 
-  if (key === 'ADMIN_BOT_TOKEN' || key === 'ADMIN_CHAT_ID') {
+  if (isBotActive(userId)) {
+    await restartBotForUser(userId)
+  } else {
+    await spawnBotForUser(userId)
+  }
+}
+
+async function refreshRuntimeIfNeeded(userId, key) {
+  await reloadConfigForUser(userId)
+  const normalizedKey = normalizeCredentialKey(key)
+
+  if (normalizedKey === 'TELEGRAM_BOT_TOKEN') {
+    await refreshTenantMap()
+    await syncMainBotRuntime(userId)
+  }
+
+  if (normalizedKey === 'ADMIN_BOT_TOKEN' || normalizedKey === 'ADMIN_CHAT_ID') {
     initAdminBotForUser(userId)
+  }
+
+  // Tetap sinkronkan bot utama pada perubahan credential apa pun.
+  // Ini membuat flow register -> set config -> set credentials tetap jalan
+  // meskipun urutan key dari frontend berubah.
+  if (normalizedKey !== 'TELEGRAM_BOT_TOKEN') {
+    await syncMainBotRuntime(userId)
   }
 }
 
 async function handleCredentialDeleteRuntime(userId, key) {
   await reloadConfigForUser(userId)
+  const normalizedKey = normalizeCredentialKey(key)
 
-  if (key === 'TELEGRAM_BOT_TOKEN') {
+  if (normalizedKey === 'TELEGRAM_BOT_TOKEN') {
     await stopBotForUser(userId)
     await refreshTenantMap()
+    return
+  }
+
+  await syncMainBotRuntime(userId)
+
+  if (normalizedKey === 'ADMIN_BOT_TOKEN' || normalizedKey === 'ADMIN_CHAT_ID') {
+    initAdminBotForUser(userId)
   }
 }
 
@@ -68,7 +104,7 @@ export async function getBotCredentials(req, res, next) {
 export async function createBotCredential(req, res, next) {
   try {
     const userId = req.auth.userId
-    const key = String(req.body?.key || '').trim()
+    const key = normalizeCredentialKey(req.body?.key)
     const rawValue = String(req.body?.value || '')
 
     if (!key || !rawValue) {
@@ -111,8 +147,8 @@ export async function createBotCredential(req, res, next) {
 export async function updateBotCredential(req, res, next) {
   try {
     const userId = req.auth.userId
-    const id = Number(req.params.id)
-    if (!Number.isInteger(id)) {
+    const id = String(req.params.id || '').trim()
+    if (!id) {
       return fail(res, 'Invalid credential id', 400)
     }
 
@@ -126,7 +162,7 @@ export async function updateBotCredential(req, res, next) {
 
     const patch = {}
     if (req.body?.key !== undefined) {
-      patch.key = String(req.body.key).trim()
+      patch.key = normalizeCredentialKey(req.body.key)
     }
     if (req.body?.value !== undefined) {
       patch.value = encrypt(String(req.body.value))
@@ -162,8 +198,8 @@ export async function updateBotCredential(req, res, next) {
 export async function deleteBotCredential(req, res, next) {
   try {
     const userId = req.auth.userId
-    const id = Number(req.params.id)
-    if (!Number.isInteger(id)) {
+    const id = String(req.params.id || '').trim()
+    if (!id) {
       return fail(res, 'Invalid credential id', 400)
     }
 

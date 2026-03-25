@@ -21,11 +21,6 @@ export async function handleMidtransWebhook(req, res, next) {
       notification.transaction_status,
     )
 
-    if (!verifyWebhookSignature(notification)) {
-      console.warn('[Webhook] Signature tidak valid!')
-      return res.status(403).json({ success: false, message: 'Forbidden' })
-    }
-
     const orderId = notification.order_id
 
     const order = await prisma.order.findFirst({
@@ -44,6 +39,11 @@ export async function handleMidtransWebhook(req, res, next) {
       return res
         .status(400)
         .json({ success: false, message: 'Invalid order: missing userId' })
+    }
+
+    if (!(await verifyWebhookSignature(userId, notification))) {
+      console.warn('[Webhook] Signature tidak valid!', `(user ${userId})`)
+      return res.status(403).json({ success: false, message: 'Forbidden' })
     }
 
     if (isPaymentSuccess(notification)) {

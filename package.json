@@ -1,7 +1,7 @@
 {
   "name": "telegram-ai-bot",
   "version": "1.0.0",
-  "description": "Telegram bot powered by Gemini AI dengan database MySQL",
+  "description": "Telegram bot powered by Gemini AI dengan database PostgreSQL",
   "main": "src/index.js",
   "type": "module",
   "scripts": {

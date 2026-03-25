@@ -6,20 +6,20 @@ import prisma from './db.js'
 
 /**
  * Ambil semua produk user yang tersedia (isAvailable = true).
- * @param {number} userId
+ * @param {string} userId
  * @returns {Promise<Product[]>}
  */
 export async function getAllProducts(userId) {
   return prisma.product.findMany({
     where: { userId, isAvailable: true },
-    orderBy: { id: 'asc' },
+    orderBy: { createdAt: 'asc' },
   })
 }
 
 /**
  * Ambil satu produk user berdasarkan ID.
- * @param {number} userId
- * @param {number} id
+ * @param {string} userId
+ * @param {string} id
  * @returns {Promise<Product|null>}
  */
 export async function getProductById(userId, id) {
@@ -31,19 +31,19 @@ export async function getProductById(userId, id) {
 /**
  * Ambil semua produk user (termasuk tidak available).
  * Untuk admin dashboard.
- * @param {number} userId
+ * @param {string} userId
  * @returns {Promise<Product[]>}
  */
 export async function getAllProductsAdmin(userId) {
   return prisma.product.findMany({
     where: { userId },
-    orderBy: { id: 'asc' },
+    orderBy: { createdAt: 'asc' },
   })
 }
 
 /**
  * Buat produk baru untuk user.
- * @param {number} userId
+ * @param {string} userId
  * @param {object} data
  * @returns {Promise<Product>}
  */
@@ -65,8 +65,8 @@ export async function createProduct(
 
 /**
  * Update produk user.
- * @param {number} userId
- * @param {number} id
+ * @param {string} userId
+ * @param {string} id
  * @param {object} data
  * @returns {Promise<Product>}
  */
@@ -79,8 +79,8 @@ export async function updateProduct(userId, id, data) {
 
 /**
  * Hapus produk user (soft delete).
- * @param {number} userId
- * @param {number} id
+ * @param {string} userId
+ * @param {string} id
  * @returns {Promise<Product>}
  */
 export async function deleteProduct(userId, id) {

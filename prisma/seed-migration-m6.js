@@ -11,6 +11,8 @@ import { PrismaClient } from '@prisma/client'
 import { encrypt } from '../src/utils/encryption.js'
 
 const prisma = new PrismaClient()
+const DEFAULT_MIGRATION_USER_EMAIL =
+  process.env.MIGRATION_USER_EMAIL || 'admin@localhost.local'
 
 // ── Dummy products untuk initial seeding ──────────────────────────────────────
 const seedProducts = [
@@ -54,15 +56,14 @@ async function main() {
   try {
     // Step 1: Cek dan buat user default jika belum ada
     let user = await prisma.user.findFirst({
-      where: { id: 1 },
+      where: { email: DEFAULT_MIGRATION_USER_EMAIL },
     })
 
     if (!user) {
       console.log('📝 Membuat user default dengan credentials dari .env...')
       user = await prisma.user.create({
         data: {
-          id: 1, // Fixed ID untuk migrasi
-          email: 'admin@localhost.local',
+          email: DEFAULT_MIGRATION_USER_EMAIL,
           passwordHash: '', // Akan diupdate via dashboard nanti
           name: 'Default Store Owner',
           plan: 'PRO', // Kasih PRO supaya bisa unlimited
@@ -71,22 +72,21 @@ async function main() {
       })
       console.log(`✅ User dibuat: ID=${user.id}, Email=${user.email}\n`)
     } else {
-      console.log(`✅ User 1 sudah ada: ${user.name}\n`)
+      console.log(`✅ User default sudah ada: ${user.name}\n`)
     }
 
     // Step 2: Setup BotConfig dari .env untuk user 1
     console.log('📝 Setup BotConfig dari .env...')
     const botConfig = await prisma.botConfig.upsert({
-      where: { id: 1 },
+      where: { userId_isActive: { userId: user.id, isActive: true } },
       update: {
-        userId: 1,
         aiEnabled: process.env.AI_ENABLED !== 'false',
         geminiModel: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
         midtransIsProduction: process.env.MIDTRANS_IS_PRODUCTION === 'true',
         isActive: true,
       },
       create: {
-        userId: 1,
+        userId: user.id,
         aiEnabled: process.env.AI_ENABLED !== 'false',
         geminiModel: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
         midtransIsProduction: process.env.MIDTRANS_IS_PRODUCTION === 'true',
@@ -125,9 +125,9 @@ async function main() {
       const encrypted = encrypt(value)
 
       await prisma.botCredential.upsert({
-        where: { userId_key: { userId: 1, key } },
+        where: { userId_key: { userId: user.id, key } },
         update: { value: encrypted },
-        create: { userId: 1, key, value: encrypted },
+        create: { userId: user.id, key, value: encrypted },
       })
 
       const preview =
@@ -142,15 +142,15 @@ async function main() {
     // Step 4: Migrate existing BotConfig (jika ada dari versi lama)
     console.log('📝 Migrasi BotConfig existing...')
     const botConfigs = await prisma.botConfig.findMany({
-      where: { userId: { not: 1 } }, // Ambil semua yang bukan user_id=1
+      where: { userId: { not: user.id } },
     })
 
     for (const config of botConfigs) {
       await prisma.botConfig.update({
         where: { id: config.id },
-        data: { userId: 1 },
+        data: { userId: user.id },
       })
-      console.log(`   ✅ BotConfig ID=${config.id} → user_id=1`)
+      console.log(`   ✅ BotConfig ID=${config.id} → user_id=${user.id}`)
     }
     if (botConfigs.length === 0)
       console.log('   ✅ Tidak ada BotConfig lain untuk dimigrasikan')
@@ -159,15 +159,15 @@ async function main() {
     // Step 5: Migrate existing BotCredential
     console.log('📝 Migrasi BotCredential existing...')
     const existingCreds = await prisma.botCredential.findMany({
-      where: { userId: { not: 1 } }, // Ambil semua yang bukan user_id=1
+      where: { userId: { not: user.id } },
     })
 
     for (const cred of existingCreds) {
       await prisma.botCredential.update({
         where: { id: cred.id },
-        data: { userId: 1 },
+        data: { userId: user.id },
       })
-      console.log(`   ✅ BotCredential "${cred.key}" → user_id=1`)
+      console.log(`   ✅ BotCredential "${cred.key}" → user_id=${user.id}`)
     }
     if (existingCreds.length === 0)
       console.log('   ✅ Tidak ada BotCredential lain untuk dimigrasikan')
@@ -176,15 +176,15 @@ async function main() {
     // Step 6: Migrate Product
     console.log('📝 Migrasi Product...')
     const products = await prisma.product.findMany({
-      where: { userId: { not: 1 } }, // Ambil semua yang bukan user_id=1
+      where: { userId: { not: user.id } },
     })
 
     for (const product of products) {
       await prisma.product.update({
         where: { id: product.id },
-        data: { userId: 1 },
+        data: { userId: user.id },
       })
-      console.log(`   ✅ Product "${product.name}" → user_id=1`)
+      console.log(`   ✅ Product "${product.name}" → user_id=${user.id}`)
     }
     if (products.length === 0)
       console.log('   ✅ Tidak ada Product lain untuk dimigrasikan')
@@ -193,14 +193,14 @@ async function main() {
     // Step 6b: Seed dummy products untuk user 1 jika belum ada
     console.log('📝 Seed produk dummy untuk user 1...')
     const existingProductsCount = await prisma.product.count({
-      where: { userId: 1 },
+      where: { userId: user.id },
     })
 
     if (existingProductsCount === 0) {
       for (const product of seedProducts) {
         await prisma.product.create({
           data: {
-            userId: 1,
+            userId: user.id,
             name: product.name,
             description: product.description,
             price: product.price,
@@ -213,22 +213,22 @@ async function main() {
       console.log('')
     } else {
       console.log(
-        `   ⏭️  User 1 sudah punya ${existingProductsCount} produk — skip seeding\n`,
+        `   ⏭️  User default sudah punya ${existingProductsCount} produk — skip seeding\n`,
       )
     }
 
     // Step 7: Migrate Order
     console.log('📝 Migrasi Order...')
     const orders = await prisma.order.findMany({
-      where: { userId: { not: 1 } }, // Ambil semua yang bukan user_id=1
+      where: { userId: { not: user.id } },
     })
 
     for (const order of orders) {
       await prisma.order.update({
         where: { id: order.id },
-        data: { userId: 1 },
+        data: { userId: user.id },
       })
-      console.log(`   ✅ Order "${order.orderId}" → user_id=1`)
+      console.log(`   ✅ Order "${order.orderId}" → user_id=${user.id}`)
     }
     if (orders.length === 0)
       console.log('   ✅ Tidak ada Order untuk dimigrasikan')
@@ -240,7 +240,7 @@ async function main() {
     const finalCredCount = await prisma.botCredential.count()
     const finalProductCount = await prisma.product.count()
     const finalProductCountUser1 = await prisma.product.count({
-      where: { userId: 1 },
+      where: { userId: user.id },
     })
     const finalOrderCount = await prisma.order.count()
 
@@ -249,7 +249,7 @@ async function main() {
     console.log(`   BotConfigs:    ${finalConfigCount}`)
     console.log(`   Credentials:   ${finalCredCount}`)
     console.log(
-      `   Products:      ${finalProductCount} (${finalProductCountUser1} untuk user_id=1)`,
+      `   Products:      ${finalProductCount} (${finalProductCountUser1} untuk user_id=${user.id})`,
     )
     console.log(`   Orders:        ${finalOrderCount}`)
     console.log('')

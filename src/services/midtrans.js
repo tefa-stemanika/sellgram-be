@@ -1,36 +1,53 @@
 // src/services/midtrans.js
 
 import crypto from 'crypto'
-import { getMidtransServerKey, isMidtransProduction } from './configService.js'
+import {
+  getMidtransServerKeyForUser,
+  isMidtransProductionForUser,
+  loadConfigForUser,
+} from './configService.js'
 
-function getBaseUrl() {
-  return isMidtransProduction()
+function getBaseUrl(isProduction) {
+  return isProduction
     ? 'https://app.midtrans.com/snap/v1'
     : 'https://app.sandbox.midtrans.com/snap/v1'
 }
 
-function getApiBase() {
-  return isMidtransProduction()
+function getApiBase(isProduction) {
+  return isProduction
     ? 'https://api.midtrans.com/v2'
     : 'https://api.sandbox.midtrans.com/v2'
 }
 
-function getAuthHeader() {
-  const serverKey = getMidtransServerKey()
+async function resolveMidtransContext(userId) {
+  if (!userId) {
+    throw new Error('userId wajib diisi untuk akses Midtrans per tenant.')
+  }
+
+  await loadConfigForUser(userId)
+
+  const serverKey = getMidtransServerKeyForUser(userId)
   if (!serverKey)
     throw new Error(
-      'MIDTRANS_SERVER_KEY tidak ditemukan di database credentials.',
+      `MIDTRANS_SERVER_KEY tidak ditemukan di database credentials untuk user ${userId}.`,
     )
-  return 'Basic ' + Buffer.from(serverKey + ':').toString('base64')
+
+  return {
+    authHeader: 'Basic ' + Buffer.from(serverKey + ':').toString('base64'),
+    isProduction: isMidtransProductionForUser(userId),
+  }
 }
 
 export async function createSnapTransaction({
+  userId,
   orderId,
   totalPrice,
   product,
   quantity,
   customer,
 }) {
+  const { authHeader, isProduction } = await resolveMidtransContext(userId)
+
   const body = {
     transaction_details: { order_id: orderId, gross_amount: totalPrice },
     item_details: [
@@ -52,11 +69,11 @@ export async function createSnapTransaction({
     },
   }
 
-  const response = await fetch(`${getBaseUrl()}/transactions`, {
+  const response = await fetch(`${getBaseUrl(isProduction)}/transactions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: getAuthHeader(),
+      Authorization: authHeader,
     },
     body: JSON.stringify(body),
   })
@@ -69,9 +86,11 @@ export async function createSnapTransaction({
   return response.json()
 }
 
-export async function checkTransactionStatus(orderId) {
-  const response = await fetch(`${getApiBase()}/${orderId}/status`, {
-    headers: { Authorization: getAuthHeader() },
+export async function checkTransactionStatus(userId, orderId) {
+  const { authHeader, isProduction } = await resolveMidtransContext(userId)
+
+  const response = await fetch(`${getApiBase(isProduction)}/${orderId}/status`, {
+    headers: { Authorization: authHeader },
   })
 
   if (!response.ok) {
@@ -84,8 +103,12 @@ export async function checkTransactionStatus(orderId) {
   return response.json()
 }
 
-export function verifyWebhookSignature(notification) {
-  const serverKey = getMidtransServerKey()
+export async function verifyWebhookSignature(userId, notification) {
+  await loadConfigForUser(userId)
+
+  const serverKey = getMidtransServerKeyForUser(userId)
+  if (!serverKey) return false
+
   const { order_id, status_code, gross_amount, signature_key } = notification
   const raw = `${order_id}${status_code}${gross_amount}${serverKey}`
   const expected = crypto.createHash('sha512').update(raw).digest('hex')

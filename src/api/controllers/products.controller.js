@@ -16,8 +16,8 @@ export async function getProducts(req, res, next) {
 
 export async function getProductById(req, res, next) {
   try {
-    const id = Number(req.params.id)
-    if (!Number.isInteger(id)) {
+    const id = String(req.params.id || '').trim()
+    if (!id) {
       return fail(res, 'Invalid product id', 400)
     }
 
@@ -61,8 +61,8 @@ export async function createProductEndpoint(req, res, next) {
 
 export async function updateProductEndpoint(req, res, next) {
   try {
-    const id = Number(req.params.id)
-    if (!Number.isInteger(id)) {
+    const id = String(req.params.id || '').trim()
+    if (!id) {
       return fail(res, 'Invalid product id', 400)
     }
 
@@ -103,8 +103,8 @@ export async function updateProductEndpoint(req, res, next) {
 
 export async function deleteProductEndpoint(req, res, next) {
   try {
-    const id = Number(req.params.id)
-    if (!Number.isInteger(id)) {
+    const id = String(req.params.id || '').trim()
+    if (!id) {
       return fail(res, 'Invalid product id', 400)
     }
 

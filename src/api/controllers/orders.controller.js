@@ -34,8 +34,8 @@ export async function getOrders(req, res, next) {
 export async function getOrderById(req, res, next) {
   try {
     const userId = req.auth.userId
-    const id = Number(req.params.id)
-    if (!Number.isInteger(id)) {
+    const id = String(req.params.id || '').trim()
+    if (!id) {
       return fail(res, 'Invalid order id', 400)
     }
 

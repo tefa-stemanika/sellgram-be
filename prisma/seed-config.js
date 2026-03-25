@@ -12,13 +12,27 @@ import { PrismaClient } from '@prisma/client'
 import { encrypt } from '../src/utils/encryption.js'
 
 const prisma = new PrismaClient()
+const DEFAULT_SEED_USER_EMAIL =
+  process.env.SEED_USER_EMAIL || 'seed-owner@localhost.local'
 
 async function main() {
   console.log('🔄 Memulai migrasi config dari .env ke database...\n')
 
+  const user = await prisma.user.upsert({
+    where: { email: DEFAULT_SEED_USER_EMAIL },
+    update: { isActive: true },
+    create: {
+      email: DEFAULT_SEED_USER_EMAIL,
+      passwordHash: 'seed-password-hash',
+      name: 'Seed Store Owner',
+      plan: 'PRO',
+      isActive: true,
+    },
+  })
+
   // ── 1. Buat atau update BotConfig ─────────────────────────────────────────
   const config = await prisma.botConfig.upsert({
-    where: { id: 1 },
+    where: { userId_isActive: { userId: user.id, isActive: true } },
     update: {
       aiEnabled: process.env.AI_ENABLED !== 'false',
       geminiModel: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
@@ -26,6 +40,7 @@ async function main() {
       isActive: true,
     },
     create: {
+      userId: user.id,
       aiEnabled: process.env.AI_ENABLED !== 'false',
       geminiModel: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
       midtransIsProduction: process.env.MIDTRANS_IS_PRODUCTION === 'true',
@@ -64,9 +79,9 @@ async function main() {
     const encrypted = encrypt(value)
 
     await prisma.botCredential.upsert({
-      where: { key },
+      where: { userId_key: { userId: user.id, key } },
       update: { value: encrypted },
-      create: { key, value: encrypted },
+      create: { userId: user.id, key, value: encrypted },
     })
 
     // Tampilkan sebagian nilai asli untuk konfirmasi (bukan full value!)

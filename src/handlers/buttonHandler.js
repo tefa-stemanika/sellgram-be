@@ -80,7 +80,7 @@ export async function handleCallbackQuery(bot, query, userId) {
         msgId,
         userId,
         telegramId,
-        parseInt(payload),
+        payload,
       )
 
     case 'select_qty':
@@ -344,6 +344,7 @@ async function handleConfirmOrder(
     })
 
     const snapResult = await createSnapTransaction({
+      userId,
       orderId: savedOrder.orderId,
       totalPrice: savedOrder.totalPrice,
       product: selectedProduct,

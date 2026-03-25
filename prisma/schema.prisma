@@ -5,7 +5,7 @@ generator client {
 }
 
 datasource db {
-  provider = "mysql"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -13,7 +13,7 @@ datasource db {
 // Tabel pemilik bot (tenant). Setiap user memiliki bot instance, config, dan data tersendiri.
 
 model User {
-  id           Int      @id @default(autoincrement())
+  id           String   @id @default(uuid()) @db.Uuid
   email        String   @unique @db.VarChar(255)
   passwordHash String   @map("password_hash") @db.Text
   name         String   @db.VarChar(100)
@@ -42,8 +42,8 @@ enum UserPlan {
 // Setiap user memiliki BotConfig sendiri (user_id FK).
 
 model BotConfig {
-  id               Int      @id @default(autoincrement())
-  userId           Int      @map("user_id")
+  id               String   @id @default(uuid()) @db.Uuid
+  userId           String   @map("user_id") @db.Uuid
   // Telegram
   botMode          String   @default("polling") @map("bot_mode") @db.VarChar(20)
   aiEnabled        Boolean  @default(false) @map("ai_enabled")
@@ -66,8 +66,8 @@ model BotConfig {
 // Setiap user memiliki credentials sendiri (user_id FK).
 
 model BotCredential {
-  id        Int      @id @default(autoincrement())
-  userId    Int      @map("user_id")
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
   key       String   @db.VarChar(100)
   value     String   @db.Text     // AES-256-GCM encrypted: "iv:authTag:ciphertext"
   createdAt DateTime @default(now()) @map("created_at")
@@ -82,8 +82,8 @@ model BotCredential {
 // ── Products ──────────────────────────────────────────────────────────────────
 
 model Product {
-  id          Int      @id @default(autoincrement())
-  userId      Int      @map("user_id")
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
   name        String   @db.VarChar(100)
   description String   @db.Text
   price       Int
@@ -101,8 +101,8 @@ model Product {
 // ── Orders ────────────────────────────────────────────────────────────────────
 
 model Order {
-  id              Int         @id @default(autoincrement())
-  userId          Int         @map("user_id")
+  id              String      @id @default(uuid()) @db.Uuid
+  userId          String      @map("user_id") @db.Uuid
   orderId         String      @map("order_id") @db.VarChar(30)
   telegramId      BigInt      @map("telegram_id")
   username        String?     @db.VarChar(100)
@@ -125,9 +125,9 @@ model Order {
 }
 
 model OrderItem {
-  id        Int     @id @default(autoincrement())
-  orderId   Int     @map("order_id")
-  productId Int     @map("product_id")
+  id        String  @id @default(uuid()) @db.Uuid
+  orderId   String  @map("order_id") @db.Uuid
+  productId String  @map("product_id") @db.Uuid
   quantity  Int
   unitPrice Int     @map("unit_price")
 

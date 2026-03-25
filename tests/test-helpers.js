@@ -168,7 +168,9 @@ export async function createTestOrder(ctx, userId, productId, quantity = 1) {
 
   const orderId = `ORD-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`
   const totalPrice = product.price * quantity
-  const telegramId = BigInt(123000000 + userId)
+  const numericSeed = String(userId).replace(/\D/g, '') || String(Date.now())
+  const safeSeed = numericSeed.slice(-9).padStart(9, '0')
+  const telegramId = BigInt(`123${safeSeed}`)
 
   const order = await prisma.order.create({
     data: {

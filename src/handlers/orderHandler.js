@@ -1,11 +1,7 @@
 // src/handlers/orderHandler.js
 // Multi-tenant order handler — mendukung multiple users dengan state terpisah
 
-import {
-  getAllProducts,
-  getProductById,
-  formatRupiah,
-} from '../services/productService.js'
+import { getAllProducts, formatRupiah } from '../services/productService.js'
 import { saveOrder, updateOrderPayment } from '../services/orderService.js'
 import { createSnapTransaction } from '../services/midtrans.js'
 import {
@@ -35,8 +31,8 @@ export async function handleMenu(bot, msg, userId) {
   }
 
   let text = '🍽️ *MENU KAMI*\n\n'
-  products.forEach((p) => {
-    text += `${p.emoji} *${p.id}. ${p.name}*\n`
+  products.forEach((p, idx) => {
+    text += `${p.emoji} *${idx + 1}. ${p.name}*\n`
     text += `    ${p.description}\n`
     text += `    💰 ${formatRupiah(p.price)}\n\n`
   })
@@ -64,8 +60,8 @@ export async function handlePesan(bot, msg, userId) {
 
   const products = await getAllProducts(userId)
   let text = '📋 *Pilih produk yang ingin dipesan:*\n\n'
-  products.forEach((p) => {
-    text += `*${p.id}.* ${p.emoji} ${p.name} — ${formatRupiah(p.price)}\n`
+  products.forEach((p, idx) => {
+    text += `*${idx + 1}.* ${p.emoji} ${p.name} — ${formatRupiah(p.price)}\n`
   })
   text += '\nKetik *nomor produk* (contoh: `1`)'
   await send(bot, chatId, text)
@@ -102,6 +98,7 @@ export async function handleKonfirmasi(bot, msg, userId) {
 
     // 2. Buat transaksi Midtrans
     const snapResult = await createSnapTransaction({
+      userId,
       orderId: savedOrder.orderId,
       totalPrice: savedOrder.totalPrice,
       product: selectedProduct,
@@ -223,7 +220,7 @@ export async function handleOrderInput(bot, msg, userId) {
 
   if (order.state === ORDER_STATE.SELECTING_PRODUCT) {
     const products = await getAllProducts(userId)
-    if (isNaN(num) || num < 1) {
+    if (isNaN(num) || num < 1 || num > products.length) {
       await send(
         bot,
         chatId,
@@ -231,7 +228,7 @@ export async function handleOrderInput(bot, msg, userId) {
       )
       return true
     }
-    const product = await getProductById(userId, num)
+    const product = products[num - 1]
     if (!product) {
       await send(bot, chatId, `⚠️ Produk nomor ${num} tidak ditemukan.`)
       return true
