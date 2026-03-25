@@ -7,6 +7,27 @@ import { getUserById, canCreateNewBot } from './userService.js'
 import { loadConfigForUser } from './configService.js'
 import { getTelegramTokenForUser } from './configService.js'
 
+async function validateTelegramToken(token) {
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/getMe`)
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}))
+      return {
+        valid: false,
+        reason: body.description || `HTTP ${response.status}`,
+      }
+    }
+
+    const body = await response.json().catch(() => ({}))
+    return {
+      valid: Boolean(body.ok),
+      reason: body.ok ? null : body.description || 'Unknown Telegram error',
+    }
+  } catch (err) {
+    return { valid: false, reason: err.message }
+  }
+}
+
 /**
  * Map<userId, { botInstance, config, user }>
  */
@@ -48,11 +69,33 @@ export async function spawnBotForUser(userId, options = {}) {
       return null
     }
 
+    // Validasi token sebelum memulai polling agar tidak spam 401 Unauthorized.
+    const tokenCheck = await validateTelegramToken(token)
+    if (!tokenCheck.valid) {
+      console.error(
+        `❌ Token Telegram tidak valid untuk user ${userId}: ${tokenCheck.reason}`,
+      )
+      return null
+    }
+
     // Tentukan mode polling vs webhook
     const isPolling = options.botMode !== 'webhook'
 
     // Spawn bot instance
     const bot = new TelegramBot(token, { polling: isPolling })
+
+    // Jika token revoke/salah, hentikan bot agar tidak flood log polling_error.
+    bot.on('polling_error', async (err) => {
+      const message = err?.message || ''
+      console.error(`❌ Polling error user ${userId}:`, message)
+
+      if (message.includes('401 Unauthorized')) {
+        console.error(
+          `⛔ Bot user ${userId} dihentikan otomatis karena token tidak valid.`,
+        )
+        await stopBotForUser(userId)
+      }
+    })
 
     // Simpan ke map
     const botData = { bot, config, user, userId }
@@ -92,9 +135,9 @@ export async function stopBotForUser(userId) {
 /**
  * Restart bot user (stop + spawn).
  */
-export async function restartBotForUser(userId) {
+export async function restartBotForUser(userId, options = {}) {
   await stopBotForUser(userId)
-  return spawnBotForUser(userId)
+  return spawnBotForUser(userId, options)
 }
 
 /**

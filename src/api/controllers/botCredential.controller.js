@@ -2,6 +2,13 @@ import prisma from '../../services/db.js'
 import { encrypt } from '../../utils/encryption.js'
 import { reloadConfigForUser } from '../../services/configService.js'
 import { refreshTenantMap } from '../../services/tenantResolver.js'
+import {
+  isBotActive,
+  restartBotForUser,
+  spawnBotForUser,
+  stopBotForUser,
+} from '../../services/botManager.js'
+import { initAdminBotForUser } from '../../services/adminBot.js'
 import { ok, fail } from '../utils/response.js'
 
 function maskCredential(value) {
@@ -11,7 +18,27 @@ function maskCredential(value) {
 
 async function refreshRuntimeIfNeeded(userId, key) {
   await reloadConfigForUser(userId)
+
   if (key === 'TELEGRAM_BOT_TOKEN') {
+    await refreshTenantMap()
+
+    if (isBotActive(userId)) {
+      await restartBotForUser(userId)
+    } else {
+      await spawnBotForUser(userId)
+    }
+  }
+
+  if (key === 'ADMIN_BOT_TOKEN' || key === 'ADMIN_CHAT_ID') {
+    initAdminBotForUser(userId)
+  }
+}
+
+async function handleCredentialDeleteRuntime(userId, key) {
+  await reloadConfigForUser(userId)
+
+  if (key === 'TELEGRAM_BOT_TOKEN') {
+    await stopBotForUser(userId)
     await refreshTenantMap()
   }
 }
@@ -149,7 +176,7 @@ export async function deleteBotCredential(req, res, next) {
     }
 
     await prisma.botCredential.delete({ where: { id } })
-    await refreshRuntimeIfNeeded(userId, existing.key)
+    await handleCredentialDeleteRuntime(userId, existing.key)
 
     return ok(res, null, 'Delete bot credential success')
   } catch (error) {
