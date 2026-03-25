@@ -8,7 +8,11 @@ import {
   notifyAdminOrderSuccessForUser,
   notifyAdminOrderFailedForUser,
 } from '../../services/adminBot.js'
-import { getBotForUser } from '../../services/botManager.js'
+import {
+  getBotForUser,
+  processTelegramWebhookUpdateForUser,
+  verifyTelegramWebhookSecretForUser,
+} from '../../services/botManager.js'
 import { getBotInstance } from '../../runtime/botRuntime.js'
 
 export async function handleMidtransWebhook(req, res, next) {
@@ -30,7 +34,9 @@ export async function handleMidtransWebhook(req, res, next) {
 
     if (!order) {
       console.warn('[Webhook] Order tidak ditemukan:', orderId)
-      return res.status(404).json({ success: false, message: 'Order not found' })
+      return res
+        .status(404)
+        .json({ success: false, message: 'Order not found' })
     }
 
     const userId = order.userId
@@ -93,6 +99,36 @@ export async function handleMidtransWebhook(req, res, next) {
     return res.status(200).json({ status: 'ok' })
   } catch (error) {
     console.error('[Webhook] Error:', error.message)
+    return next(error)
+  }
+}
+
+export async function handleTelegramWebhook(req, res, next) {
+  try {
+    const userId = String(req.params.userId || '').trim()
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'Invalid userId' })
+    }
+
+    const secretToken = req.headers['x-telegram-bot-api-secret-token']
+    const isSecretValid = await verifyTelegramWebhookSecretForUser(
+      userId,
+      secretToken,
+    )
+
+    if (!isSecretValid) {
+      return res.status(403).json({ success: false, message: 'Forbidden' })
+    }
+
+    const result = await processTelegramWebhookUpdateForUser(userId, req.body)
+    if (!result.success) {
+      return res
+        .status(503)
+        .json({ success: false, message: result.reason || 'Bot not ready' })
+    }
+
+    return res.status(200).json({ ok: true })
+  } catch (error) {
     return next(error)
   }
 }

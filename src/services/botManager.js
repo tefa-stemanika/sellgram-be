@@ -3,6 +3,7 @@
 // Setiap user aktif mendapat satu instance bot yang berjalan dengan context userId-nya.
 
 import TelegramBot from 'node-telegram-bot-api'
+import crypto from 'crypto'
 import { getUserById, canCreateNewBot } from './userService.js'
 import { loadConfigForUser } from './configService.js'
 import { getTelegramTokenForUser } from './configService.js'
@@ -78,6 +79,106 @@ function setObservability(userId, patch) {
 
   botObservability.set(userId, next)
   return next
+}
+
+function buildWebhookSecretFromToken(token) {
+  // Telegram secret_token max 256 chars; keep short and deterministic.
+  return crypto.createHash('sha256').update(String(token)).digest('hex')
+}
+
+function buildTelegramApiUrl(token, method) {
+  return `https://api.telegram.org/bot${token}/${method}`
+}
+
+function sanitizeBaseUrl(baseUrl) {
+  return String(baseUrl || '').replace(/\/$/, '')
+}
+
+export async function configureTelegramWebhookForUser(userId, publicBaseUrl) {
+  await loadConfigForUser(userId)
+
+  const token = getTelegramTokenForUser(userId)
+  if (!token) {
+    setObservability(userId, {
+      running: false,
+      tokenStatus: 'missing',
+      reason: 'TELEGRAM_BOT_TOKEN belum diisi.',
+    })
+    return { success: false, reason: 'TELEGRAM_BOT_TOKEN belum diisi.' }
+  }
+
+  const tokenCheck = await validateTelegramToken(token)
+  if (!tokenCheck.valid) {
+    setObservability(userId, {
+      running: false,
+      tokenStatus: 'invalid',
+      reason: tokenCheck.reason || 'Token Telegram tidak valid.',
+    })
+    return {
+      success: false,
+      reason: tokenCheck.reason || 'Token Telegram tidak valid.',
+    }
+  }
+
+  const baseUrl = sanitizeBaseUrl(publicBaseUrl)
+  if (!baseUrl) {
+    return {
+      success: false,
+      reason: 'Public base URL backend tidak tersedia untuk set webhook.',
+    }
+  }
+
+  const webhookUrl = `${baseUrl}/api/webhook/telegram/${encodeURIComponent(
+    userId,
+  )}`
+  const secretToken = buildWebhookSecretFromToken(token)
+
+  const deleteRes = await fetch(buildTelegramApiUrl(token, 'deleteWebhook'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ drop_pending_updates: false }),
+  })
+
+  const deleteBody = await deleteRes.json().catch(() => ({}))
+  if (!deleteRes.ok || deleteBody.ok === false) {
+    const reason = deleteBody.description || `HTTP ${deleteRes.status}`
+    setObservability(userId, {
+      tokenStatus: 'invalid',
+      reason: `Gagal delete webhook: ${reason}`,
+    })
+    return { success: false, reason: `Gagal delete webhook: ${reason}` }
+  }
+
+  const setRes = await fetch(buildTelegramApiUrl(token, 'setWebhook'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url: webhookUrl,
+      secret_token: secretToken,
+      drop_pending_updates: false,
+      allowed_updates: ['message', 'callback_query'],
+    }),
+  })
+
+  const setBody = await setRes.json().catch(() => ({}))
+  if (!setRes.ok || setBody.ok === false) {
+    const reason = setBody.description || `HTTP ${setRes.status}`
+    setObservability(userId, {
+      tokenStatus: 'invalid',
+      reason: `Gagal set webhook: ${reason}`,
+    })
+    return { success: false, reason: `Gagal set webhook: ${reason}` }
+  }
+
+  setObservability(userId, {
+    tokenStatus: 'valid',
+    reason: `Webhook aktif di ${webhookUrl}`,
+  })
+
+  return {
+    success: true,
+    webhookUrl,
+  }
 }
 
 /**
@@ -161,13 +262,13 @@ export async function spawnBotForUser(userId, options = {}) {
       return null
     }
 
-    // Tentukan mode polling vs webhook
-    const isPolling = options.botMode !== 'webhook'
+    // Webhook-only mode: jangan gunakan polling.
+    const bot = new TelegramBot(token, { polling: false })
 
-    // Spawn bot instance
-    const bot = new TelegramBot(token, { polling: isPolling })
+    const { registerHandlersForUser } = await import('../handlers/index.js')
+    registerHandlersForUser(bot, userId, config)
 
-    // Jika token revoke/salah, hentikan bot agar tidak flood log polling_error.
+    // Guard jika ada event polling_error dari lib (seharusnya tidak aktif di mode webhook).
     bot.on('polling_error', async (err) => {
       const message = err?.message || ''
       console.error(`❌ Polling error user ${userId}:`, message)
@@ -302,9 +403,7 @@ export async function spawnAllActiveBots() {
     }
 
     // Spawn bot
-    const botData = await spawnBotForUser(user.id, {
-      botMode: user.botConfigs?.[0]?.botMode || 'polling',
-    })
+    const botData = await spawnBotForUser(user.id)
 
     if (botData) {
       results.success++
@@ -383,4 +482,31 @@ export async function getBotObservabilityStatusForUser(
   }
 
   return current
+}
+
+export async function verifyTelegramWebhookSecretForUser(userId, secretToken) {
+  await loadConfigForUser(userId)
+  const token = getTelegramTokenForUser(userId)
+  if (!token) return false
+
+  const expected = buildWebhookSecretFromToken(token)
+  return String(secretToken || '') === expected
+}
+
+export async function processTelegramWebhookUpdateForUser(userId, update) {
+  let botData = getBotDataForUser(userId)
+
+  if (!botData) {
+    botData = await spawnBotForUser(userId)
+  }
+
+  if (!botData?.bot) {
+    return {
+      success: false,
+      reason: 'Bot runtime belum siap untuk memproses webhook update.',
+    }
+  }
+
+  await Promise.resolve(botData.bot.processUpdate(update))
+  return { success: true }
 }

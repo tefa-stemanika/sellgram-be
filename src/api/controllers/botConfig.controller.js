@@ -18,7 +18,7 @@ async function syncBotAfterConfigChange(userId) {
   }
 
   if (isBotActive(userId)) {
-    await restartBotForUser(userId, { botMode: config.botMode })
+    await restartBotForUser(userId)
   }
 }
 
@@ -39,7 +39,7 @@ export async function createBotConfig(req, res, next) {
   try {
     const userId = req.auth.userId
     const data = {
-      botMode: req.body?.botMode || 'polling',
+      botMode: 'webhook',
       aiEnabled: req.body?.aiEnabled ?? true,
       geminiModel: req.body?.geminiModel || 'gemini-2.0-flash',
       midtransIsProduction: req.body?.midtransIsProduction ?? false,
@@ -78,7 +78,7 @@ export async function updateBotConfig(req, res, next) {
     }
 
     const patch = {
-      ...(req.body?.botMode !== undefined && { botMode: req.body.botMode }),
+      botMode: 'webhook',
       ...(req.body?.aiEnabled !== undefined && {
         aiEnabled: req.body.aiEnabled,
       }),

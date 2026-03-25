@@ -2,7 +2,7 @@
 // Entry point untuk MULTI-TENANT (M6) mode.
 // Spawn bot instances untuk setiap user active, masing-masing dengan context userId.
 //
-// Jalankan: BOT_MODE=polling NODE_ENV=development node src/index.js
+// Jalankan: NODE_ENV=development node src/index.js
 
 import 'dotenv/config'
 import { createApp } from './app.js'
@@ -19,15 +19,11 @@ import {
   getActiveBots,
 } from './services/botManager.js'
 
-// ── 1b. Import handler registration ─────────────────────────────────────────────
-import { registerHandlersForAllBots } from './handlers/index.js'
-
 console.log('🚀 Telegram AI Bot — Multi-Tenant Mode (M6)\n')
 await spawnAllActiveBots()
 
-// ── 1c. Register handlers untuk semua active bots ────────────────────────────────
+// ── 1c. Ambil active bots setelah spawn ───────────────────────────────────────────
 const activeBots = getActiveBots()
-registerHandlersForAllBots(activeBots)
 
 // ── 1d. Initialize admin bots untuk notifikasi order ─────────────────────────────
 import { initAllAdminBots } from './services/adminBot.js'

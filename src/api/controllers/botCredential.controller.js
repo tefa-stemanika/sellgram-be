@@ -6,6 +6,7 @@ import {
 } from '../../services/configService.js'
 import { refreshTenantMap } from '../../services/tenantResolver.js'
 import {
+  configureTelegramWebhookForUser,
   isBotActive,
   restartBotForUser,
   spawnBotForUser,
@@ -20,7 +21,24 @@ function maskCredential(value) {
 }
 
 function normalizeCredentialKey(key) {
-  return String(key || '').trim().toUpperCase()
+  return String(key || '')
+    .trim()
+    .toUpperCase()
+}
+
+function getPublicBaseUrl(req) {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '')
+    .split(',')[0]
+    .trim()
+  const forwardedHost = String(req.headers['x-forwarded-host'] || '')
+    .split(',')[0]
+    .trim()
+
+  const proto = forwardedProto || req.protocol || 'https'
+  const host = forwardedHost || req.headers.host
+  if (!host) return null
+
+  return `${proto}://${host}`
 }
 
 async function syncMainBotRuntime(userId) {
@@ -36,21 +54,37 @@ async function syncMainBotRuntime(userId) {
 
   if (isBotActive(userId)) {
     await restartBotForUser(userId)
-  } else {
-    await spawnBotForUser(userId)
+    return
   }
+
+  await spawnBotForUser(userId)
 }
 
-async function refreshRuntimeIfNeeded(userId, key) {
+async function refreshRuntimeIfNeeded(userId, key, req) {
   await reloadConfigForUser(userId)
   const normalizedKey = normalizeCredentialKey(key)
 
   if (normalizedKey === 'TELEGRAM_BOT_TOKEN') {
     await refreshTenantMap()
     await syncMainBotRuntime(userId)
+
+    // const publicBaseUrl = getPublicBaseUrl(req)
+    const publicBaseUrl = process.env.PUBLIC_BASE_URL
+    const webhookSync = await configureTelegramWebhookForUser(
+      userId,
+      publicBaseUrl,
+    )
+    if (!webhookSync.success) {
+      console.warn(
+        `[BotCredential] Gagal sinkronisasi webhook user ${userId}: ${webhookSync.reason}`,
+      )
+    }
   }
 
-  if (normalizedKey === 'ADMIN_BOT_TOKEN' || normalizedKey === 'ADMIN_CHAT_ID') {
+  if (
+    normalizedKey === 'ADMIN_BOT_TOKEN' ||
+    normalizedKey === 'ADMIN_CHAT_ID'
+  ) {
     initAdminBotForUser(userId)
   }
 
@@ -74,7 +108,10 @@ async function handleCredentialDeleteRuntime(userId, key) {
 
   await syncMainBotRuntime(userId)
 
-  if (normalizedKey === 'ADMIN_BOT_TOKEN' || normalizedKey === 'ADMIN_CHAT_ID') {
+  if (
+    normalizedKey === 'ADMIN_BOT_TOKEN' ||
+    normalizedKey === 'ADMIN_CHAT_ID'
+  ) {
     initAdminBotForUser(userId)
   }
 }
@@ -121,7 +158,7 @@ export async function createBotCredential(req, res, next) {
       },
     })
 
-    await refreshRuntimeIfNeeded(userId, key)
+    await refreshRuntimeIfNeeded(userId, key, req)
 
     return ok(
       res,
@@ -173,7 +210,7 @@ export async function updateBotCredential(req, res, next) {
       data: patch,
     })
 
-    await refreshRuntimeIfNeeded(userId, updated.key)
+    await refreshRuntimeIfNeeded(userId, updated.key, req)
 
     return ok(
       res,
