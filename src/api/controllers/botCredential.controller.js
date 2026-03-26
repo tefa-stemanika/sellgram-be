@@ -70,6 +70,11 @@ async function refreshRuntimeIfNeeded(userId, key, req) {
 
     // const publicBaseUrl = getPublicBaseUrl(req)
     const publicBaseUrl = process.env.PUBLIC_BASE_URL
+    if (!publicBaseUrl) {
+      console.error(
+        '[❌ Error] src/api/controllers/botCredential.controller.js, process.env.PUBLIC_BASE_URL is empty',
+      )
+    }
     const webhookSync = await configureTelegramWebhookForUser(
       userId,
       publicBaseUrl,

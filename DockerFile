@@ -1,0 +1,20 @@
+FROM node:20-alpine
+
+WORKDIR /src
+
+RUN apk add --no-cache openssl
+
+# Install dependencies first for better layer cache
+COPY package*.json ./
+COPY prisma ./prisma
+RUN npm ci
+
+# Copy source code
+COPY . .
+
+# Generate Prisma client at build time
+RUN npx prisma generate
+
+EXPOSE 3000
+
+CMD ["npm", "start"]

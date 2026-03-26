@@ -53,7 +53,7 @@ export async function register(req, res, next) {
         aiEnabled: true,
         geminiModel: 'gemini-2.0-flash',
         midtransIsProduction: false,
-        botMode: 'polling',
+        botMode: 'webhook',
         isActive: true,
       },
     })
