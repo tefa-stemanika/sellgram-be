@@ -1,6 +1,7 @@
 
 ```
 telegram-ai-bot
+├─ .dockerignore
 ├─ 1README.md
 ├─ ARCHITECTURE.md
 ├─ DEPLOYMENT_CHECKLIST.md
@@ -18,6 +19,7 @@ telegram-ai-bot
 ├─ README.md
 ├─ Telegram Order Bot API.postman_collection.json
 ├─ WEBHOOK_ERROR_FIX.md
+├─ docker-compose.yml
 ├─ package.json
 ├─ prisma
 │  ├─ DATABASE.md

@@ -68,8 +68,8 @@ async function refreshRuntimeIfNeeded(userId, key, req) {
     await refreshTenantMap()
     await syncMainBotRuntime(userId)
 
-    // const publicBaseUrl = getPublicBaseUrl(req)
-    const publicBaseUrl = process.env.PUBLIC_BASE_URL ?? getPublicBaseUrl(req)
+    const publicBaseUrl =
+      String(process.env.PUBLIC_BASE_URL || '').trim() || getPublicBaseUrl(req)
     console.log(`[BotCredential] publicBaseUrl: "${publicBaseUrl}"`)
     const webhookSync = await configureTelegramWebhookForUser(
       userId,

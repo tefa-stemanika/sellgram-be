@@ -91,7 +91,43 @@ function buildTelegramApiUrl(token, method) {
 }
 
 function sanitizeBaseUrl(baseUrl) {
-  return String(baseUrl || '').replace(/\/$/, '')
+  return String(baseUrl || '')
+    .trim()
+    .replace(/^['\"]|['\"]$/g, '')
+    .replace(/\/$/, '')
+}
+
+function validateAndNormalizeBaseUrl(baseUrl) {
+  const sanitized = sanitizeBaseUrl(baseUrl)
+  if (!sanitized) {
+    return {
+      ok: false,
+      reason: 'Public base URL backend tidak tersedia untuk set webhook.',
+    }
+  }
+
+  let parsed
+  try {
+    parsed = new URL(sanitized)
+  } catch {
+    return {
+      ok: false,
+      reason: `PUBLIC_BASE_URL tidak valid: "${sanitized}"`,
+    }
+  }
+
+  if (parsed.protocol !== 'https:') {
+    return {
+      ok: false,
+      reason: 'PUBLIC_BASE_URL harus https untuk webhook Telegram.',
+    }
+  }
+
+  return { ok: true, baseUrl: `${parsed.origin}` }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 export async function configureTelegramWebhookForUser(userId, publicBaseUrl) {
@@ -120,13 +156,12 @@ export async function configureTelegramWebhookForUser(userId, publicBaseUrl) {
     }
   }
 
-  const baseUrl = sanitizeBaseUrl(publicBaseUrl)
-  if (!baseUrl) {
-    return {
-      success: false,
-      reason: 'Public base URL backend tidak tersedia untuk set webhook.',
-    }
+  const normalized = validateAndNormalizeBaseUrl(publicBaseUrl)
+  if (!normalized.ok) {
+    return { success: false, reason: normalized.reason }
   }
+
+  const baseUrl = normalized.baseUrl
 
   const webhookUrl = `${baseUrl}/api/webhook/telegram/${encodeURIComponent(
     userId,
@@ -149,25 +184,47 @@ export async function configureTelegramWebhookForUser(userId, publicBaseUrl) {
     return { success: false, reason: `Gagal delete webhook: ${reason}` }
   }
 
-  const setRes = await fetch(buildTelegramApiUrl(token, 'setWebhook'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      url: webhookUrl,
-      secret_token: secretToken,
-      drop_pending_updates: false,
-      allowed_updates: ['message', 'callback_query'],
-    }),
-  })
+  let setWebhookError = null
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const setRes = await fetch(buildTelegramApiUrl(token, 'setWebhook'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: webhookUrl,
+        secret_token: secretToken,
+        drop_pending_updates: false,
+        allowed_updates: ['message', 'callback_query'],
+      }),
+    })
 
-  const setBody = await setRes.json().catch(() => ({}))
-  if (!setRes.ok || setBody.ok === false) {
+    const setBody = await setRes.json().catch(() => ({}))
+    const isOk = setRes.ok && setBody.ok !== false
+    if (isOk) {
+      setWebhookError = null
+      break
+    }
+
     const reason = setBody.description || `HTTP ${setRes.status}`
+    setWebhookError = reason
+
+    // Telegram kadang memberi error DNS sementara. Coba ulang sebentar.
+    if (
+      attempt < 3 &&
+      /Failed to resolve host|name resolution/i.test(String(reason))
+    ) {
+      await sleep(1000 * attempt)
+      continue
+    }
+
+    break
+  }
+
+  if (setWebhookError) {
     setObservability(userId, {
       tokenStatus: 'invalid',
-      reason: `Gagal set webhook: ${reason}`,
+      reason: `Gagal set webhook: ${setWebhookError}`,
     })
-    return { success: false, reason: `Gagal set webhook: ${reason}` }
+    return { success: false, reason: `Gagal set webhook: ${setWebhookError}` }
   }
 
   setObservability(userId, {
