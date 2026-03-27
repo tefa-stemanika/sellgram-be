@@ -9,6 +9,7 @@ import {
   configureTelegramWebhookForUser,
   isBotActive,
   restartBotForUser,
+  scheduleTelegramWebhookReconcileForUser,
   spawnBotForUser,
   stopBotForUser,
 } from '../../services/botManager.js'
@@ -79,6 +80,13 @@ async function refreshRuntimeIfNeeded(userId, key, req) {
       console.warn(
         `[BotCredential] Gagal sinkronisasi webhook user ${userId}: ${webhookSync.reason}`,
       )
+
+      if (webhookSync.transient) {
+        console.warn(
+          `[BotCredential] Menjadwalkan background webhook reconcile untuk user ${userId} karena error transient.`,
+        )
+        scheduleTelegramWebhookReconcileForUser(userId, publicBaseUrl)
+      }
     }
   }
 
