@@ -186,6 +186,10 @@ export async function configureTelegramWebhookForUser(userId, publicBaseUrl) {
 
   let setWebhookError = null
   for (let attempt = 1; attempt <= 3; attempt++) {
+    console.log(
+      `[BotManager] set webhook url percobaan ke-${attempt}: `,
+      buildTelegramApiUrl(token, 'setWebhook'),
+    )
     const setRes = await fetch(buildTelegramApiUrl(token, 'setWebhook'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
