@@ -34,14 +34,14 @@ async function main() {
   const config = await prisma.botConfig.upsert({
     where: { userId_isActive: { userId: user.id, isActive: true } },
     update: {
-      aiEnabled: process.env.AI_ENABLED !== 'false',
+      aiEnabled: process.env.AI_ENABLED === 'true',
       geminiModel: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
       midtransIsProduction: process.env.MIDTRANS_IS_PRODUCTION === 'true',
       isActive: true,
     },
     create: {
       userId: user.id,
-      aiEnabled: process.env.AI_ENABLED !== 'false',
+      aiEnabled: process.env.AI_ENABLED === 'true',
       geminiModel: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
       midtransIsProduction: process.env.MIDTRANS_IS_PRODUCTION === 'true',
       isActive: true,

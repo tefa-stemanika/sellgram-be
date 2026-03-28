@@ -50,7 +50,7 @@ export async function register(req, res, next) {
     await prisma.botConfig.create({
       data: {
         userId: user.id,
-        aiEnabled: true,
+        aiEnabled: false,
         geminiModel: 'gemini-2.0-flash',
         midtransIsProduction: false,
         botMode: 'webhook',

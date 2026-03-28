@@ -40,7 +40,7 @@ export async function createBotConfig(req, res, next) {
     const userId = req.auth.userId
     const data = {
       botMode: 'webhook',
-      aiEnabled: req.body?.aiEnabled ?? true,
+      aiEnabled: req.body?.aiEnabled ?? false,
       geminiModel: req.body?.geminiModel || 'gemini-2.0-flash',
       midtransIsProduction: req.body?.midtransIsProduction ?? false,
       isActive: true,

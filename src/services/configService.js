@@ -149,7 +149,7 @@ export function getGeminiModelForUser(userId) {
 
 export function isAiEnabledForUser(userId) {
   const config = getBotConfigForUser(userId)
-  return config?.aiEnabled || false
+  return config?.aiEnabled ?? false
 }
 
 export function isMidtransProductionForUser(userId) {
