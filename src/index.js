@@ -1,17 +1,14 @@
-// src/index.js
-// Entry point untuk MULTI-TENANT (M6) mode.
-// Spawn bot instances untuk setiap user active, masing-masing dengan context userId.
-//
-// Jalankan: NODE_ENV=development node src/index.js
-
 import 'dotenv/config'
 import { createApp } from './app.js'
-
-// ── 0. Init tenant resolver dulu (mapping token→userId) ──────────────────────
+import { getRedisClient, redisQuit } from './services/redis.js'
 import { initializeTenantMap } from './services/tenantResolver.js'
+
+console.log('🚀 Telegram AI Bot — Multi-Tenant Mode (M6)\n')
+
+getRedisClient()
+
 await initializeTenantMap()
 
-// ── 1. Spawn semua bot instances untuk user yang active ────────────────────────
 import {
   spawnAllActiveBots,
   stopAllBots,
@@ -19,13 +16,10 @@ import {
   getActiveBots,
 } from './services/botManager.js'
 
-console.log('🚀 Telegram AI Bot — Multi-Tenant Mode (M6)\n')
 await spawnAllActiveBots()
 
-// ── 1c. Ambil active bots setelah spawn ───────────────────────────────────────────
 const activeBots = getActiveBots()
 
-// ── 1d. Initialize admin bots untuk notifikasi order ─────────────────────────────
 import { initAllAdminBots } from './services/adminBot.js'
 const activeUserIds = Array.from(activeBots.keys())
 if (activeUserIds.length > 0) {
@@ -34,10 +28,9 @@ if (activeUserIds.length > 0) {
   console.warn('⚠️  Tidak ada active users — admin bots tidak diinisialisasi.')
 }
 
-// ── 2. Start API server (health, webhook, dashboard API) ──────────────────────
-const port = parseInt(process.env.WEBHOOK_PORT || '3000')
+const port = parseInt(process.env.PORT || '3000')
 const app = createApp()
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`🌐 API server berjalan di http://localhost:${port}`)
   console.log(`   API root: http://localhost:${port}/api`)
   console.log(`   Health check: http://localhost:${port}/api/health`)
@@ -46,18 +39,23 @@ app.listen(port, () => {
   )
 })
 
-// ── 3. Periodic check: monitoring bot status ────────────────────────────────────
 setInterval(() => {
   const stats = getBotsStatistics()
   console.log(`📊 Active bots: ${stats.totalActiveBots}`)
-}, 60000) // log setiap 1 menit
+}, 60000)
 
-// ── 4. Graceful shutdown ────────────────────────────────────────────────────────
-process.on('SIGINT', async () => {
-  console.log('\n⏹️  Menghentikan semua bot instances...')
+async function shutdown(signal) {
+  console.log(`\n⏹️  ${signal} diterima — shutdown...`)
+  server.close()
   await stopAllBots()
+  await redisQuit()
+  const { default: prisma } = await import('./services/db.js')
+  await prisma.$disconnect()
   process.exit(0)
-})
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
 
 process.on('uncaughtException', (err) => console.error('❌ Uncaught:', err))
 process.on('unhandledRejection', (err) => console.error('❌ Unhandled:', err))

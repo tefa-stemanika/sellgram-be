@@ -5,21 +5,35 @@ import webhookRouter from './api/routes/webhook.routes.js'
 import { requestLogger } from './api/middlewares/requestLogger.middleware.js'
 import { notFoundHandler } from './api/middlewares/notFound.middleware.js'
 import { errorHandler } from './api/middlewares/error.middleware.js'
+import { redisPing } from './services/redis.js'
+import prisma from './services/db.js'
 
 export function createApp() {
   const app = express()
 
-  // Enable CORS globally so dashboard frontend can access from any origin.
   app.use(cors())
-
 
   app.use(express.json({ limit: '1mb' }))
   app.use(requestLogger)
 
-  // Pasang webhookRouter lebih awal, agar tidak terkena middleware lain
-  app.use('/api', webhookRouter)
+  app.get('/health', async (req, res) => {
+    const checks = { status: 'ok' }
+    try {
+      checks.redis = await redisPing() ? 'ok' : 'error'
+    } catch {
+      checks.redis = 'error'
+    }
+    try {
+      await prisma.$queryRaw`SELECT 1`
+      checks.db = 'ok'
+    } catch {
+      checks.db = 'error'
+    }
+    const healthy = checks.redis === 'ok' && checks.db === 'ok'
+    res.status(healthy ? 200 : 503).json(checks)
+  })
 
-  // Router lain (bisa saja ada middleware autentikasi di dalamnya)
+  app.use('/api', webhookRouter)
   app.use('/api', apiRouter)
 
   app.use(notFoundHandler)

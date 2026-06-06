@@ -13,7 +13,6 @@ import {
   processTelegramWebhookUpdateForUser,
   verifyTelegramWebhookSecretForUser,
 } from '../../services/botManager.js'
-import { getBotInstance } from '../../runtime/botRuntime.js'
 
 export async function handleMidtransWebhook(req, res, next) {
   try {
@@ -37,6 +36,11 @@ export async function handleMidtransWebhook(req, res, next) {
       return res
         .status(404)
         .json({ success: false, message: 'Order not found' })
+    }
+
+    if (order.status === 'COMPLETED') {
+      console.log('[Webhook] Order sudah COMPLETED, skip duplikat:', orderId)
+      return res.status(200).json({ status: 'ok', skipped: true })
     }
 
     const userId = order.userId
@@ -63,11 +67,6 @@ export async function handleMidtransWebhook(req, res, next) {
       const userBot = getBotForUser(userId)
       if (userBot) {
         await sendPaymentSuccessNotification(userBot, order)
-      } else {
-        const botInstance = getBotInstance()
-        if (botInstance) {
-          await sendPaymentSuccessNotification(botInstance, order)
-        }
       }
 
       await notifyAdminOrderSuccessForUser(userId, order, notification)
@@ -86,11 +85,6 @@ export async function handleMidtransWebhook(req, res, next) {
       const userBot = getBotForUser(userId)
       if (userBot) {
         await sendPaymentFailedNotification(userBot, order)
-      } else {
-        const botInstance = getBotInstance()
-        if (botInstance) {
-          await sendPaymentFailedNotification(botInstance, order)
-        }
       }
 
       await notifyAdminOrderFailedForUser(userId, order)
@@ -105,12 +99,14 @@ export async function handleMidtransWebhook(req, res, next) {
 
 export async function handleTelegramWebhook(req, res, next) {
   try {
+    console.log("[Webhook] Update Telegram diterima", { body: JSON.stringify(req.body, null, 2) })
     const userId = String(req.params.userId || '').trim()
     if (!userId) {
       return res.status(400).json({ success: false, message: 'Invalid userId' })
     }
 
     const secretToken = req.headers['x-telegram-bot-api-secret-token']
+
     const isSecretValid = await verifyTelegramWebhookSecretForUser(
       userId,
       secretToken,

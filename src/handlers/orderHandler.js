@@ -1,6 +1,3 @@
-// src/handlers/orderHandler.js
-// Multi-tenant order handler — mendukung multiple users dengan state terpisah
-
 import { getAllProducts, formatRupiah } from '../services/productService.js'
 import { saveOrder, updateOrderPayment } from '../services/orderService.js'
 import { createSnapTransaction } from '../services/midtrans.js'
@@ -18,8 +15,6 @@ async function send(bot, chatId, text) {
     await bot.sendMessage(chatId, text)
   }
 }
-
-// ── /menu ────────────────────────────────────────────────────────────────────
 
 export async function handleMenu(bot, msg, userId) {
   const chatId = msg.chat.id
@@ -40,13 +35,11 @@ export async function handleMenu(bot, msg, userId) {
   await send(bot, chatId, text)
 }
 
-// ── /pesan ───────────────────────────────────────────────────────────────────
-
 export async function handlePesan(bot, msg, userId) {
   const chatId = msg.chat.id
   const telegramId = msg.from.id
 
-  const current = getOrder(userId, telegramId)
+  const current = await getOrder(userId, telegramId)
   if (current.state !== ORDER_STATE.IDLE) {
     await send(
       bot,
@@ -56,7 +49,7 @@ export async function handlePesan(bot, msg, userId) {
     return
   }
 
-  setOrder(userId, telegramId, { state: ORDER_STATE.SELECTING_PRODUCT })
+  await setOrder(userId, telegramId, { state: ORDER_STATE.SELECTING_PRODUCT })
 
   const products = await getAllProducts(userId)
   let text = '📋 *Pilih produk yang ingin dipesan:*\n\n'
@@ -67,12 +60,10 @@ export async function handlePesan(bot, msg, userId) {
   await send(bot, chatId, text)
 }
 
-// ── /konfirmasi ──────────────────────────────────────────────────────────────
-
 export async function handleKonfirmasi(bot, msg, userId) {
   const chatId = msg.chat.id
   const telegramId = msg.from.id
-  const order = getOrder(userId, telegramId)
+  const order = await getOrder(userId, telegramId)
 
   if (order.state !== ORDER_STATE.CONFIRMING) {
     await send(bot, chatId, '⚠️ Tidak ada order yang perlu dikonfirmasi.')
@@ -81,12 +72,10 @@ export async function handleKonfirmasi(bot, msg, userId) {
 
   const { selectedProduct, quantity } = order
 
-  // Kirim loading indicator
   await bot.sendChatAction(chatId, 'typing')
   await send(bot, chatId, '⏳ Memproses order dan membuat link pembayaran...')
 
   try {
-    // 1. Simpan order ke database dengan userId
     const savedOrder = await saveOrder({
       userId,
       telegramId,
@@ -96,7 +85,6 @@ export async function handleKonfirmasi(bot, msg, userId) {
       quantity,
     })
 
-    // 2. Buat transaksi Midtrans
     const snapResult = await createSnapTransaction({
       userId,
       orderId: savedOrder.orderId,
@@ -106,16 +94,13 @@ export async function handleKonfirmasi(bot, msg, userId) {
       customer: { firstName: msg.from.first_name },
     })
 
-    // 3. Simpan payment URL ke database (scoped dengan userId)
     await updateOrderPayment(userId, savedOrder.orderId, {
       paymentUrl: snapResult.redirect_url,
       snapToken: snapResult.token,
     })
 
-    // 4. Reset state order user (selesai dari flow)
-    resetOrder(userId, telegramId)
+    await resetOrder(userId, telegramId)
 
-    // 5. Kirim invoice + link pembayaran ke user
     const total = selectedProduct.price * quantity
     const invoice = `✅ *Order Berhasil Dibuat!*
 
@@ -147,18 +132,17 @@ Kamu akan otomatis mendapat notifikasi setelah pembayaran berhasil.`
   }
 }
 
-// ── /batal ───────────────────────────────────────────────────────────────────
-
 export async function handleBatal(bot, msg, userId) {
   const chatId = msg.chat.id
   const telegramId = msg.from.id
 
-  if (getOrder(userId, telegramId).state === ORDER_STATE.IDLE) {
+  const current = await getOrder(userId, telegramId)
+  if (current.state === ORDER_STATE.IDLE) {
     await send(bot, chatId, 'ℹ️ Tidak ada order yang sedang berjalan.')
     return
   }
 
-  resetOrder(userId, telegramId)
+  await resetOrder(userId, telegramId)
   await send(
     bot,
     chatId,
@@ -166,12 +150,10 @@ export async function handleBatal(bot, msg, userId) {
   )
 }
 
-// ── handleOrderStatus ─────────────────────────────────────────────────────────
-
 export async function handleOrderStatus(bot, msg, userId) {
   const chatId = msg.chat.id
   const telegramId = msg.from.id
-  const order = getOrder(userId, telegramId)
+  const order = await getOrder(userId, telegramId)
 
   if (order.state === ORDER_STATE.IDLE) {
     await send(
@@ -206,12 +188,10 @@ export async function handleOrderStatus(bot, msg, userId) {
   await send(bot, chatId, text)
 }
 
-// ── handleOrderInput (flow angka) ─────────────────────────────────────────────
-
 export async function handleOrderInput(bot, msg, userId) {
   const chatId = msg.chat.id
   const telegramId = msg.from.id
-  const order = getOrder(userId, telegramId)
+  const order = await getOrder(userId, telegramId)
   const input = msg.text?.trim()
 
   if (order.state === ORDER_STATE.IDLE) return false
@@ -233,7 +213,7 @@ export async function handleOrderInput(bot, msg, userId) {
       await send(bot, chatId, `⚠️ Produk nomor ${num} tidak ditemukan.`)
       return true
     }
-    setOrder(userId, telegramId, {
+    await setOrder(userId, telegramId, {
       state: ORDER_STATE.SELECTING_QTY,
       selectedProduct: product,
     })
@@ -255,7 +235,7 @@ export async function handleOrderInput(bot, msg, userId) {
       return true
     }
     const { selectedProduct } = order
-    setOrder(userId, telegramId, {
+    await setOrder(userId, telegramId, {
       state: ORDER_STATE.CONFIRMING,
       quantity: num,
     })

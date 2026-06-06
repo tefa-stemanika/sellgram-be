@@ -119,7 +119,7 @@ async function testBotLifecycle() {
     console.log('   Starting bot spawn...')
     // Note: We skip actual spawn since it requires valid Telegram token
     // Just verify structure
-    assert(user.user.id > 0, 'User created with valid ID')
+    assert(typeof user.user.id === 'string' && user.user.id.length > 0, 'User created with valid ID')
     assert(user.botToken.length > 0, 'Bot token generated')
 
     // Test 2: Verify bot would be gettable

@@ -1,5 +1,5 @@
 import prisma from '../../services/db.js'
-import { encrypt } from '../../utils/encryption.js'
+import { encrypt, decrypt } from '../../utils/encryption.js'
 import {
   getTelegramTokenForUser,
   reloadConfigForUser,
@@ -16,8 +16,12 @@ import {
 import { initAdminBotForUser } from '../../services/adminBot.js'
 import { ok, fail } from '../utils/response.js'
 
-function maskCredential(value) {
-  if (!value) return null
+function maskCredential(encryptedValue) {
+  if (!encryptedValue) return null
+  try {
+    const plain = decrypt(encryptedValue)
+    if (!plain) return null
+  } catch {}
   return '***encrypted***'
 }
 
@@ -143,49 +147,6 @@ export async function getBotCredentials(req, res, next) {
 
     return ok(res, data, 'Get bot credentials success')
   } catch (error) {
-    return next(error)
-  }
-}
-
-export async function createBotCredential(req, res, next) {
-  try {
-    const userId = req.auth.userId
-    const key = normalizeCredentialKey(req.body?.key)
-    const rawValue = String(req.body?.value || '')
-
-    if (!key || !rawValue) {
-      return fail(res, 'key dan value wajib diisi', 400)
-    }
-
-    const encryptedValue = encrypt(rawValue)
-
-    const created = await prisma.botCredential.create({
-      data: {
-        userId,
-        key,
-        value: encryptedValue,
-      },
-    })
-
-    await refreshRuntimeIfNeeded(userId, key, req)
-
-    return ok(
-      res,
-      {
-        id: created.id,
-        userId: created.userId,
-        key: created.key,
-        value: maskCredential(created.value),
-        createdAt: created.createdAt,
-        updatedAt: created.updatedAt,
-      },
-      'Create bot credential success',
-      201,
-    )
-  } catch (error) {
-    if (error.code === 'P2002') {
-      return fail(res, 'credential key sudah ada untuk user ini', 409)
-    }
     return next(error)
   }
 }

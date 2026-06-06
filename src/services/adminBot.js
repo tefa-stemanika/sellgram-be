@@ -14,8 +14,6 @@ import {
  */
 const adminBots = new Map()
 
-let adminBot = null // legacy backwards-compat
-
 /**
  * Initialize admin bot for a specific user (multi-tenant).
  * Return: BotInstance atau null jika tidak ada token.
@@ -66,15 +64,6 @@ export async function initAllAdminBots(userIds) {
  */
 export function getAdminBotForUser(userId) {
   return adminBots.get(userId) || null
-}
-
-/**
- * Legacy backwards-compat: initialize global admin bot (DEFAULT_USER_ID=1)
- */
-export function initAdminBot() {
-  const DEFAULT_USER_ID = 1
-  adminBot = initAdminBotForUser(DEFAULT_USER_ID)
-  return adminBot
 }
 
 /**
@@ -190,22 +179,6 @@ Tidak perlu diproses.`
       err.message,
     )
   }
-}
-
-/**
- * Legacy backwards-compat: Notify admin order success (DEFAULT_USER_ID=1)
- */
-export async function notifyAdminOrderSuccess(order, notification) {
-  const DEFAULT_USER_ID = 1
-  return notifyAdminOrderSuccessForUser(DEFAULT_USER_ID, order, notification)
-}
-
-/**
- * Legacy backwards-compat: Notify admin order failed (DEFAULT_USER_ID=1)
- */
-export async function notifyAdminOrderFailed(order) {
-  const DEFAULT_USER_ID = 1
-  return notifyAdminOrderFailedForUser(DEFAULT_USER_ID, order)
 }
 
 function formatPaymentMethod(paymentType) {

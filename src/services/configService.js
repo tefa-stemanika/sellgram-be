@@ -1,28 +1,35 @@
-// src/services/configService.js
-// Multi-tenant config service — mengelola config per user (tenant).
-// Cache di memory agar tidak query DB di setiap pesan.
-
 import prisma from './db.js'
 import { decrypt } from '../utils/encryption.js'
+import { redisGet, redisSet, redisDel, redisKeys } from './redis.js'
 
-// ── Cache per userId ───────────────────────────────────────────────────────────
-// Map<userId, { config: BotConfig, creds: Map<key, value> }>
+const CONFIG_CACHE_TTL = 600
 
 const userConfigCache = new Map()
 
-/**
- * Load config untuk user tertentu.
- * Jika sudah di-cache, return dari cache.
- * Jika belum, load dari DB dan cache.
- */
+async function populateCacheFromRedis(userId) {
+  const cached = await redisGet(`tenant_config:${userId}`)
+  if (cached) {
+    const creds = new Map(Object.entries(cached.creds || {}))
+    userConfigCache.set(userId, { config: cached.config, creds })
+    return cached.config
+  }
+  return null
+}
+
+async function persistCacheToRedis(userId, config, creds) {
+  const credsObj = Object.fromEntries(creds)
+  await redisSet(`tenant_config:${userId}`, { config, creds: credsObj }, CONFIG_CACHE_TTL)
+}
+
 export async function loadConfigForUser(userId) {
-  // Cek cache dulu
   if (userConfigCache.has(userId)) {
     return userConfigCache.get(userId).config
   }
 
+  const fromRedis = await populateCacheFromRedis(userId)
+  if (fromRedis) return fromRedis
+
   try {
-    // Ambil BotConfig user yang aktif
     const config = await prisma.botConfig.findFirst({
       where: { userId, isActive: true },
     })
@@ -32,7 +39,6 @@ export async function loadConfigForUser(userId) {
       return null
     }
 
-    // Ambil semua credentials user
     const credsRows = await prisma.botCredential.findMany({
       where: { userId },
     })
@@ -49,8 +55,8 @@ export async function loadConfigForUser(userId) {
       }
     }
 
-    // Simpan ke cache
     userConfigCache.set(userId, { config, creds })
+    await persistCacheToRedis(userId, config, creds)
     return config
   } catch (err) {
     console.error(`[Config] Error load config user ${userId}:`, err.message)
@@ -58,33 +64,28 @@ export async function loadConfigForUser(userId) {
   }
 }
 
-/**
- * Load credentials untuk user (untuk internal use).
- */
 export async function loadCredsForUser(userId) {
   if (userConfigCache.has(userId)) {
     return userConfigCache.get(userId).creds
   }
 
-  // Force load
   await loadConfigForUser(userId)
   const cached = userConfigCache.get(userId)
   return cached?.creds || null
 }
 
-/**
- * Reload config user (dipanggil saat ada perubahan via dashboard).
- */
 export async function reloadConfigForUser(userId) {
   userConfigCache.delete(userId)
+  await redisDel(`tenant_config:${userId}`)
   return loadConfigForUser(userId)
 }
 
-/**
- * Reload semua config (saat startup atau admin action).
- */
 export async function reloadAllConfigs() {
   userConfigCache.clear()
+  const keys = await redisKeys('tenant_config:*')
+  if (keys.length > 0) {
+    await redisDel(...keys)
+  }
   console.log('[Config] Semua config di-reset')
 }
 
@@ -157,59 +158,3 @@ export function isMidtransProductionForUser(userId) {
   return config?.midtransIsProduction || false
 }
 
-// ── Legacy single-tenant getters (backwards compatibility) ──────────────────────
-// Untuk migrasi gradual, tetap support single-user scenario.
-// Anggap userId = 1 sebagai default.
-
-const DEFAULT_USER_ID = 1
-
-/**
- * Load config user default (migrasi backward-compat).
- */
-export async function loadConfig() {
-  return loadConfigForUser(DEFAULT_USER_ID)
-}
-
-export function getCredential(key) {
-  return getCredentialForUser(DEFAULT_USER_ID, key)
-}
-
-export function getBotConfig() {
-  return getBotConfigForUser(DEFAULT_USER_ID)
-}
-
-export function getTelegramToken() {
-  return getTelegramTokenForUser(DEFAULT_USER_ID)
-}
-
-export function getAdminBotToken() {
-  return getAdminBotTokenForUser(DEFAULT_USER_ID)
-}
-
-export function getAdminChatId() {
-  return getAdminChatIdForUser(DEFAULT_USER_ID)
-}
-
-export function getGeminiApiKey() {
-  return getGeminiApiKeyForUser(DEFAULT_USER_ID)
-}
-
-export function getMidtransServerKey() {
-  return getMidtransServerKeyForUser(DEFAULT_USER_ID)
-}
-
-export function getMidtransClientKey() {
-  return getMidtransClientKeyForUser(DEFAULT_USER_ID)
-}
-
-export function getGeminiModel() {
-  return getGeminiModelForUser(DEFAULT_USER_ID)
-}
-
-export function isAiEnabled() {
-  return isAiEnabledForUser(DEFAULT_USER_ID)
-}
-
-export function isMidtransProduction() {
-  return isMidtransProductionForUser(DEFAULT_USER_ID)
-}

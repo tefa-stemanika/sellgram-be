@@ -7,6 +7,7 @@ import crypto from 'crypto'
 import { getUserById, canCreateNewBot } from './userService.js'
 import { loadConfigForUser } from './configService.js'
 import { getTelegramTokenForUser } from './configService.js'
+import { redisSetNx, redisLpush, redisRpop, redisDel } from './redis.js'
 
 const TELEGRAM_API_TIMEOUT_MS = 15_000
 const WEBHOOK_RETRY_DELAYS_MS = [0, 1_500, 4_000, 9_000]
@@ -490,24 +491,6 @@ export async function spawnBotForUser(userId, options = {}) {
     const { registerHandlersForUser } = await import('../handlers/index.js')
     registerHandlersForUser(bot, userId, config)
 
-    // Guard jika ada event polling_error dari lib (seharusnya tidak aktif di mode webhook).
-    bot.on('polling_error', async (err) => {
-      const message = err?.message || ''
-      console.error(`❌ Polling error user ${userId}:`, message)
-
-      if (message.includes('401 Unauthorized')) {
-        console.error(
-          `⛔ Bot user ${userId} dihentikan otomatis karena token tidak valid.`,
-        )
-        setObservability(userId, {
-          running: false,
-          tokenStatus: 'invalid',
-          reason: 'Polling 401 Unauthorized dari Telegram.',
-        })
-        await stopBotForUser(userId)
-      }
-    })
-
     // Simpan ke map
     const botData = { bot, config, user, userId }
     activeBots.set(userId, botData)
@@ -547,9 +530,6 @@ export async function stopBotForUser(userId) {
   }
 
   try {
-    if (botData.bot.isPolling()) {
-      await botData.bot.stopPolling()
-    }
     activeBots.delete(userId)
     setObservability(userId, {
       running: false,
@@ -716,19 +696,37 @@ export async function verifyTelegramWebhookSecretForUser(userId, secretToken) {
 }
 
 export async function processTelegramWebhookUpdateForUser(userId, update) {
-  let botData = getBotDataForUser(userId)
-
-  if (!botData) {
-    botData = await spawnBotForUser(userId)
+  const telegramId = update.message?.from?.id || update.callback_query?.from?.id
+  if (!telegramId) {
+    return { success: false, reason: 'No telegramId in update.' }
   }
 
-  if (!botData?.bot) {
-    return {
-      success: false,
-      reason: 'Bot runtime belum siap untuk memproses webhook update.',
+  const queueKey = `webhook_queue:${userId}:${telegramId}`
+  await redisLpush(queueKey, update)
+
+  const lockKey = `webhook_lock:${userId}:${telegramId}`
+  const acquired = await redisSetNx(lockKey, '1', 30)
+  if (!acquired) {
+    return { success: true }
+  }
+
+  try {
+    let botData = getBotDataForUser(userId)
+    if (!botData) {
+      botData = await spawnBotForUser(userId)
     }
+    if (!botData?.bot) {
+      return { success: false, reason: 'Bot runtime belum siap.' }
+    }
+
+    while (true) {
+      const item = await redisRpop(queueKey)
+      if (item === null) break
+      botData.bot.processUpdate(item)
+    }
+  } finally {
+    await redisDel(lockKey)
   }
 
-  await Promise.resolve(botData.bot.processUpdate(update))
   return { success: true }
 }

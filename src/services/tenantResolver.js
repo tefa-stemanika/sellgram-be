@@ -1,24 +1,15 @@
-// src/services/tenantResolver.js
-// Service untuk menentukan user (tenant) dari bot token atau from incoming message.
-// Ini adalah core dari multi-tenant logic.
-
+import crypto from 'crypto'
 import prisma from './db.js'
 import { decrypt } from '../utils/encryption.js'
+import { redisGet, redisSet, redisDel, redisKeys } from './redis.js'
 
-/**
- * Cache: Map<botToken, userId>
- * Diisi saat startup, di-clear jika ada perubahan credentials.
- */
+const TENANT_MAP_TTL = 600
+
 let tokenUserMap = new Map()
 let mapInitialized = false
 
-/**
- * Inisialisasi cache token->userId dari database.
- * Dipanggil sekali saat startup.
- */
 export async function initializeTenantMap() {
   try {
-    // Ambil semua credentials TELEGRAM_BOT_TOKEN dari semua user
     const creds = await prisma.botCredential.findMany({
       where: { key: 'TELEGRAM_BOT_TOKEN' },
       include: { user: { select: { id: true, isActive: true } } },
@@ -32,6 +23,8 @@ export async function initializeTenantMap() {
       try {
         const token = decrypt(cred.value)
         tokenUserMap.set(token, cred.userId)
+        const tokenHash = crypto.createHash('sha256').update(token).digest('hex').slice(0, 16)
+        await redisSet(`tenant_map:${tokenHash}`, cred.userId, TENANT_MAP_TTL)
       } catch (err) {
         console.error(
           `[TenantResolver] Gagal dekripsi token user ${cred.userId}:`,
@@ -51,58 +44,48 @@ export async function initializeTenantMap() {
   }
 }
 
-/**
- * Cari userId dari bot token.
- * Return: userId atau null jika tidak ditemukan.
- */
-export function resolveUserIdFromToken(botToken) {
-  const userId = tokenUserMap.get(botToken)
-  if (!userId) {
-    console.warn(`[TenantResolver] Token tidak ditemukan di map.`)
-    return null
-  }
-  return userId
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex').slice(0, 16)
 }
 
-/**
- * Cari userId dari Telegram message.
- * Perlu tahu bot token yang menerima message tersebut.
- */
-export function resolveUserIdFromMessage(msg, botTokenParam) {
-  // Cara ke-1: dari parameter token (jika diketahui)
-  if (botTokenParam) {
-    return resolveUserIdFromToken(botTokenParam)
+export async function resolveUserIdFromToken(botToken) {
+  const fromMemory = tokenUserMap.get(botToken)
+  if (fromMemory) return fromMemory
+
+  const tokenHash = hashToken(botToken)
+  const fromRedis = await redisGet(`tenant_map:${tokenHash}`)
+  if (fromRedis) {
+    tokenUserMap.set(botToken, fromRedis)
+    return fromRedis
   }
 
-  // Cara ke-2: nanti bisa di-extend untuk callback query atau inline response
-
+  console.warn(`[TenantResolver] Token tidak ditemukan.`)
   return null
 }
 
-/**
- * Refresh tenant map (dipanggil saat ada perubahan credentials).
- */
+export function resolveUserIdFromMessage(msg, botTokenParam) {
+  if (botTokenParam) {
+    return resolveUserIdFromToken(botTokenParam)
+  }
+  return null
+}
+
 export async function refreshTenantMap() {
+  const keys = await redisKeys('tenant_map:*')
+  if (keys.length > 0) {
+    await redisDel(...keys)
+  }
   return initializeTenantMap()
 }
 
-/**
- * Cek apakah tenant map sudah diinisialisasi.
- */
 export function isTenantMapReady() {
   return mapInitialized
 }
 
-/**
- * Dapatkan semua token yang terdaftar (untuk debugging).
- */
 export function getRegisteredTokens() {
   return Array.from(tokenUserMap.keys())
 }
 
-/**
- * Get statistics.
- */
 export function getTenantResolverStats() {
   return {
     isReady: mapInitialized,

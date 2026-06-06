@@ -4,6 +4,7 @@ import crypto from 'crypto'
 import {
   getMidtransServerKeyForUser,
   isMidtransProductionForUser,
+  getCredentialForUser,
   loadConfigForUser,
 } from './configService.js'
 
@@ -65,7 +66,7 @@ export async function createSnapTransaction({
     enabled_payments: ['qris', 'gopay', 'shopeepay', 'bank_transfer'],
     qris: { acquirer: 'gopay' },
     callbacks: {
-      finish: process.env.MIDTRANS_FINISH_URL || 'https://t.me/',
+      finish: getCredentialForUser(userId, 'MIDTRANS_FINISH_URL') || process.env.MIDTRANS_FINISH_URL || 'https://t.me/',
     },
   }
 

@@ -1,6 +1,3 @@
-// src/handlers/buttonHandler.js
-// Multi-tenant button/callback handler — mendukung multiple users
-
 import {
   getAllProducts,
   getProductById,
@@ -15,12 +12,6 @@ import {
   ORDER_STATE,
 } from '../services/order.js'
 
-// ── Helper ───────────────────────────────────────────────────────────────────
-
-/**
- * Edit pesan sebelumnya (teks + hapus keyboard lama).
- * Digunakan untuk "update" tampilan setelah button diklik.
- */
 async function editMessage(bot, chatId, messageId, text, keyboard = null) {
   const opts = { parse_mode: 'Markdown' }
   if (keyboard) opts.reply_markup = { inline_keyboard: keyboard }
@@ -32,7 +23,6 @@ async function editMessage(bot, chatId, messageId, text, keyboard = null) {
       ...opts,
     })
   } catch {
-    // Fallback: kirim pesan baru jika edit gagal (misal pesan terlalu lama)
     await bot.sendMessage(chatId, text, {
       parse_mode: 'Markdown',
       reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined,
@@ -40,24 +30,13 @@ async function editMessage(bot, chatId, messageId, text, keyboard = null) {
   }
 }
 
-/**
- * Jawab callback query agar loading spinner di button hilang.
- * Wajib dipanggil di setiap handler, jika tidak button akan "loading" terus.
- */
 async function answerCallback(bot, callbackQueryId, text = '') {
   try {
     await bot.answerCallbackQuery(callbackQueryId, { text })
   } catch {
-    // Ignore — callback query mungkin sudah expired (>10 menit)
   }
 }
 
-// ── Main Dispatcher ──────────────────────────────────────────────────────────
-
-/**
- * Entry point — dipanggil dari index.js saat ada callback_query masuk.
- * Parse action dan payload lalu arahkan ke handler yang sesuai.
- */
 export async function handleCallbackQuery(bot, query, userId) {
   const chatId = query.message.chat.id
   const msgId = query.message.message_id
@@ -65,7 +44,7 @@ export async function handleCallbackQuery(bot, query, userId) {
   const data = query.data || ''
 
   const [action, ...rest] = data.split(':')
-  const payload = rest.join(':') // support payload yang mengandung ":"
+  const payload = rest.join(':')
 
   switch (action) {
     case 'show_menu':
@@ -122,8 +101,6 @@ export async function handleCallbackQuery(bot, query, userId) {
   }
 }
 
-// ── Menu dengan Button ────────────────────────────────────────────────────────
-
 export async function showMenuButtons(bot, chatId, editMsgId = null, userId) {
   const products = await getAllProducts(userId)
 
@@ -141,7 +118,6 @@ export async function showMenuButtons(bot, chatId, editMsgId = null, userId) {
   })
   text += 'Pilih produk di bawah untuk memesan:'
 
-  // Buat tombol grid produk — maksimal 2 per baris
   const productButtons = []
   for (let i = 0; i < products.length; i += 2) {
     const row = [
@@ -171,8 +147,6 @@ export async function showMenuButtons(bot, chatId, editMsgId = null, userId) {
   return bot.sendMessage(chatId, text, opts)
 }
 
-// ── Pilih Produk ──────────────────────────────────────────────────────────────
-
 async function handleSelectProduct(
   bot,
   chatId,
@@ -181,9 +155,8 @@ async function handleSelectProduct(
   telegramId,
   productId,
 ) {
-  const current = getOrder(userId, telegramId)
+  const current = await getOrder(userId, telegramId)
 
-  // Jika sudah ada order berjalan, tanya dulu
   if (current.state !== ORDER_STATE.IDLE) {
     const keyboard = [
       [
@@ -211,14 +184,13 @@ async function handleSelectProduct(
     )
   }
 
-  setOrder(userId, telegramId, {
+  await setOrder(userId, telegramId, {
     state: ORDER_STATE.SELECTING_QTY,
     selectedProduct: product,
   })
 
   const text = `${product.emoji} *${product.name}*\n💰 ${formatRupiah(product.price)}\n\nPilih jumlah:`
 
-  // Tombol jumlah cepat: 1–5, + tombol angka lain
   const keyboard = [
     [
       { text: '1', callback_data: `select_qty:1` },
@@ -236,10 +208,8 @@ async function handleSelectProduct(
   return editMessage(bot, chatId, msgId, text, keyboard)
 }
 
-// ── Pilih Jumlah ──────────────────────────────────────────────────────────────
-
 async function handleSelectQty(bot, chatId, msgId, userId, telegramId, qty) {
-  const order = getOrder(userId, telegramId)
+  const order = await getOrder(userId, telegramId)
 
   if (order.state !== ORDER_STATE.SELECTING_QTY || !order.selectedProduct) {
     return editMessage(
@@ -264,7 +234,7 @@ async function handleSelectQty(bot, chatId, msgId, userId, telegramId, qty) {
 
   const { selectedProduct } = order
   const total = selectedProduct.price * qty
-  setOrder(userId, telegramId, { state: ORDER_STATE.CONFIRMING, quantity: qty })
+  await setOrder(userId, telegramId, { state: ORDER_STATE.CONFIRMING, quantity: qty })
 
   const summary = `📝 *Ringkasan Order*
 
@@ -287,21 +257,16 @@ ${selectedProduct.emoji} ${selectedProduct.name}
   return editMessage(bot, chatId, msgId, summary, keyboard)
 }
 
-// ── Input Jumlah Custom (via teks) ────────────────────────────────────────────
-
 async function handleAskCustomQty(bot, chatId, userId, telegramId) {
-  // Set flag di state agar handleOrderInput tahu user sedang input qty custom
-  const order = getOrder(userId, telegramId)
+  const order = await getOrder(userId, telegramId)
   if (order.state === ORDER_STATE.SELECTING_QTY) {
-    setOrder(userId, telegramId, { awaitingCustomQty: true })
+    await setOrder(userId, telegramId, { awaitingCustomQty: true })
   }
 
   await bot.sendMessage(chatId, 'Ketik jumlah yang kamu inginkan (1–99):', {
     reply_markup: { force_reply: true, selective: true },
   })
 }
-
-// ── Konfirmasi Order → Buat Transaksi Midtrans ────────────────────────────────
 
 async function handleConfirmOrder(
   bot,
@@ -311,7 +276,7 @@ async function handleConfirmOrder(
   telegramId,
   fromUser,
 ) {
-  const order = getOrder(userId, telegramId)
+  const order = await getOrder(userId, telegramId)
 
   if (order.state !== ORDER_STATE.CONFIRMING) {
     return editMessage(
@@ -325,7 +290,6 @@ async function handleConfirmOrder(
 
   const { selectedProduct, quantity } = order
 
-  // Tampilkan loading state di pesan
   await editMessage(
     bot,
     chatId,
@@ -357,7 +321,7 @@ async function handleConfirmOrder(
       snapToken: snapResult.token,
     })
 
-    resetOrder(userId, telegramId)
+    await resetOrder(userId, telegramId)
 
     const total = selectedProduct.price * quantity
     const invoice = `✅ *Order Berhasil Dibuat!*
@@ -374,7 +338,6 @@ ${selectedProduct.emoji} ${selectedProduct.name}
 Tersedia: QRIS, GoPay, ShopeePay, Transfer Bank
 ⏰ Link berlaku 24 jam`
 
-    // Tombol langsung ke halaman pembayaran
     const keyboard = [
       [{ text: '💳 Bayar Sekarang', url: snapResult.redirect_url }],
       [{ text: '🍽️ Pesan Lagi', callback_data: 'back_to_menu' }],
@@ -396,28 +359,18 @@ Tersedia: QRIS, GoPay, ShopeePay, Transfer Bank
   }
 }
 
-// ── Batal Order ───────────────────────────────────────────────────────────────
-
 async function handleCancelOrder(bot, chatId, msgId, userId, telegramId) {
-  resetOrder(userId, telegramId)
+  await resetOrder(userId, telegramId)
 
   const keyboard = [[{ text: '🍽️ Lihat Menu', callback_data: 'back_to_menu' }]]
 
   return editMessage(bot, chatId, msgId, '❌ Order dibatalkan.', keyboard)
 }
 
-// ── Handler input teks saat awaiting custom qty ───────────────────────────────
-
-/**
- * Dipanggil dari messageHandler saat user mengetik angka
- * setelah menekan tombol "Jumlah lain..."
- *
- * @returns {boolean} true jika ditangani di sini
- */
 export async function handleCustomQtyInput(bot, msg, userId) {
   const chatId = msg.chat.id
   const telegramId = msg.from.id
-  const order = getOrder(userId, telegramId)
+  const order = await getOrder(userId, telegramId)
 
   if (order.state !== ORDER_STATE.SELECTING_QTY || !order.awaitingCustomQty) {
     return false
@@ -433,12 +386,11 @@ export async function handleCustomQtyInput(bot, msg, userId) {
     return true
   }
 
-  // Reset flag lalu lanjutkan seperti pilih qty normal
-  setOrder(userId, telegramId, { awaitingCustomQty: false })
+  await setOrder(userId, telegramId, { awaitingCustomQty: false })
 
   const { selectedProduct } = order
   const total = selectedProduct.price * num
-  setOrder(userId, telegramId, { state: ORDER_STATE.CONFIRMING, quantity: num })
+  await setOrder(userId, telegramId, { state: ORDER_STATE.CONFIRMING, quantity: num })
 
   const summary = `📝 *Ringkasan Order*
 

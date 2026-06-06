@@ -105,7 +105,7 @@ export async function createTestUser(ctx, overrides = {}) {
       aiEnabled: true,
       geminiModel: 'gemini-2.0-flash',
       midtransIsProduction: false,
-      botMode: 'polling',
+      botMode: 'webhook',
       isActive: true,
     },
   })

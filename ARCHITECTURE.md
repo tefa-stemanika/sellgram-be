@@ -1,16 +1,24 @@
-# ARCHITECTURE.md — Arsitektur Sistem
+# ARCHITECTURE.md — Arsitektur Sistem (v2)
+
+> Dokumen ini menggantikan ARCHITECTURE.md v1.
+> Perubahan utama: migrasi in-memory state ke Redis, full webhook mode, idempotency guard, dan Redis cache layer untuk tenant config.
+
+---
 
 ## Stack Teknologi
 
-| Layer | Teknologi |
-|---|---|
-| Runtime | Node.js >= 18 (native fetch, ESM) |
-| Bot Library | `node-telegram-bot-api` |
-| AI | Google Gemini API (native fetch, tanpa SDK) |
-| Payment | Midtrans Snap API (native fetch, tanpa SDK) |
-| ORM | Prisma |
-| Database | MySQL / MariaDB |
-| Enkripsi | Node.js `crypto` — AES-256-GCM |
+| Layer         | Teknologi                      | Keterangan                                     |
+| ------------- | ------------------------------ | ---------------------------------------------- |
+| Runtime       | Node.js >= 18                  | Native fetch, ESM                              |
+| Web Framework | Express.js                     | REST API & Webhook receiver                    |
+| Bot Library   | `node-telegram-bot-api`        | **Webhook mode only** (polling dihapus)        |
+| AI            | Google Gemini API              | Native fetch, tanpa SDK                        |
+| Payment       | Midtrans Snap API              | Native fetch, tanpa SDK                        |
+| ORM           | Prisma                         | Connection pool dikonfigurasi eksplisit        |
+| Database      | PostgreSQL                     | Source of truth semua data persisten           |
+| Cache & State | Redis                          | Tenant config cache, order state, chat history |
+| Enkripsi      | Node.js `crypto` — AES-256-GCM | Semua credentials di DB terenkripsi            |
+| Container     | Docker + Docker Compose        | Multi-service orchestration                    |
 
 ---
 
@@ -19,241 +27,400 @@
 ```
 telegram-ai-bot/
 ├── docs/                        ← Dokumentasi project
-│   ├── PLAN.md                  ← Roadmap & rencana
-│   ├── ARCHITECTURE.md          ← Dokumen ini
-│   ├── SERVICES.md              ← Dokumentasi services
-│   └── HANDLERS.md              ← Dokumentasi handlers
 ├── prisma/
-│   ├── schema.prisma            ← Definisi tabel database
-│   ├── seed.js                  ← Seed data produk awal
-│   └── seed-config.js           ← Migrasi credentials dari .env ke DB
+│   ├── schema.prisma            ← Definisi tabel database PostgreSQL
+│   ├── seed.js                  ← Script seed data default
+│   └── migrations/              ← Riwayat migrasi database
 ├── src/
-│   ├── index.js                 ← Entry point
-│   ├── webhook.js               ← HTTP server webhook Midtrans
+│   ├── index.js                 ← Entry point (Init webhook server, graceful shutdown)
+│   ├── app.js                   ← Express app setup (Middlewares, CORS)
+│   ├── api/
+│   │   ├── controllers/         ← Handler logika API dashboard
+│   │   ├── middlewares/         ← Auth, Error handler, Rate limiter, Logger
+│   │   └── routes/              ← Endpoint definitions (auth, bots, orders, products, webhooks)
 │   ├── handlers/
+│   │   ├── index.js             ← Pendaftaran handler per userId (Tenant)
 │   │   ├── messageHandler.js    ← Router pesan masuk (AI vs button mode)
 │   │   ├── orderHandler.js      ← Flow order via command/teks
 │   │   └── buttonHandler.js     ← Flow order via inline keyboard
 │   ├── services/
-│   │   ├── configService.js     ← Single source of truth config dari DB
-│   │   ├── db.js                ← Prisma client singleton
+│   │   ├── botManager.js        ← Multi-tenant Bot Manager (webhook mode, tanpa polling)
+│   │   ├── tenantResolver.js    ← Resolusi config tenant dengan Redis cache layer
+│   │   ├── configService.js     ← Pengelola config (BotConfig)
+│   │   ├── db.js                ← Prisma client singleton (dengan connection pool)
+│   │   ├── redis.js             ← Redis client singleton (ioredis)
 │   │   ├── gemini.js            ← Integrasi Gemini AI
 │   │   ├── midtrans.js          ← Integrasi Midtrans payment
-│   │   ├── adminBot.js          ← Bot notifikasi ke admin
-│   │   ├── productService.js    ← Query produk dari DB
-│   │   ├── orderService.js      ← Query & simpan order ke DB
-│   │   ├── order.js             ← State machine order (in-memory)
-│   │   └── session.js           ← Riwayat chat AI (in-memory)
+│   │   ├── adminBot.js          ← Notifikasi ke admin (Multi-tenant)
+│   │   ├── userService.js       ← Logika User (Tenant)
+│   │   ├── productService.js    ← CRUD Produk berdasarkan userId
+│   │   ├── orderService.js      ← CRUD Order berdasarkan userId
+│   │   ├── order.js             ← Order state via Redis (bukan in-memory Map)
+│   │   └── session.js           ← Chat history AI via Redis (bukan in-memory Map)
 │   └── utils/
-│       └── encryption.js        ← AES-256-GCM encrypt/decrypt
-├── .env                         ← Hanya DATABASE_URL, ENCRYPTION_KEY, dll
-├── .env.example                 ← Template
+│       ├── encryption.js        ← AES-256-GCM encrypt/decrypt
+│       ├── jwt.js               ← JWT generator untuk Dashboard Auth
+│       └── password.js          ← Bcrypt / hashing password
+├── docker-compose.yml           ← Orchestration: app + redis + postgres
+├── Dockerfile                   ← Build image aplikasi
+├── .env                         ← DATABASE_URL, REDIS_URL, ENCRYPTION_KEY, dst.
 └── package.json
 ```
 
 ---
 
-## Arsitektur Saat Ini (Single-Tenant)
+## Arsitektur SaaS Multi-Tenant (v2)
 
-```
+```text
 .env (infrastruktur)
-  DATABASE_URL, ENCRYPTION_KEY, BOT_MODE, WEBHOOK_PORT
+  DATABASE_URL, REDIS_URL, ENCRYPTION_KEY, JWT_SECRET, WEBHOOK_SECRET, PORT
          │
          ▼
-    index.js
-    loadConfig() ──► DB: bot_config + bot_credentials (terenkripsi)
-         │                    │
-         │              configService.js (cache in-memory)
-         │                    │
-    TelegramBot ◄─────────────┤
-         │                    │
-    messageHandler ───────────┤
-         │                    │
-    ┌────┴────┐          ┌────┴──────────┐
-    │ AI Mode │          │ Button Mode   │
-    │ gemini  │          │ buttonHandler │
-    └────┬────┘          └──────┬────────┘
-         │                     │
-         └─────────┬───────────┘
-                   │
-             orderHandler
-                   │
-          ┌────────┴────────┐
-          │                 │
-    orderService       midtrans.js
-    (simpan order)   (buat transaksi)
-          │                 │
-          DB           Midtrans API
-                            │
-                     webhook.js ◄── Midtrans notifikasi
-                            │
-                   ┌────────┴────────┐
-                   │                 │
-             botInstance         adminBot.js
-           (notif pembeli)    (notif admin)
+    index.js (Startup)
+         │
+         ├──► 1. redis.js         (Init Redis client singleton)
+         │
+         ├──► 2. tenantResolver.js (Init — set webhook URL tiap tenant aktif ke Telegram)
+         │
+         └──► 3. app.js           (Mulai Express server)
+                 │
+                 ├──► POST /api/webhook/telegram/:userId  ← Pesan masuk dari Telegram
+                 ├──► POST /api/webhook/midtrans          ← Notifikasi payment dari Midtrans
+                 └──► /api/*                              ← REST API Dashboard Panel
+```
+
+> **Perubahan dari v1:** `botManager` tidak lagi spawn instance bot dengan polling.
+> Semua pesan masuk melalui satu webhook endpoint per tenant.
+> Tidak ada koneksi idle ke Telegram API.
+
+---
+
+## Flow Lengkap: Webhook Telegram
+
+### 1. Pesan Masuk
+
+```
+Telegram POST /api/webhook/telegram/:userId
+```
+
+### 2. Validasi Request
+
+```js
+// middleware: validateTelegramWebhook
+if (
+  req.headers['x-telegram-bot-api-secret-token'] !== process.env.WEBHOOK_SECRET
+) {
+  return res.status(403).end()
+}
+```
+
+### 3. Tenant Resolver — Cache Layer
+
+```text
+Redis GET tenant_config:{userId}
+  │
+  ├── HIT  → config langsung digunakan (< 1ms)
+  │
+  └── MISS → query PostgreSQL (bot_config + bot_credentials)
+               → decrypt AES-256-GCM tiap credential
+               → Redis SET tenant_config:{userId} EX 600
+               → config siap digunakan
+```
+
+### 4. Message Routing
+
+```text
+messageHandler.js
+  │
+  ├── AI mode   → Gemini API → Redis RPUSH session:{userId}:{telegramId} (max 20 item)
+  │
+  └── Button mode → buttonHandler.js
+                     → Redis GET order:{userId}:{telegramId}
+                         │
+                         ├── IDLE       → kirim menu produk
+                         ├── SELECTING  → proses pilihan, update state di Redis
+                         └── CONFIRMING → lanjut ke orderHandler
+```
+
+### 5. Order Handler — Buat Pembayaran
+
+```text
+orderHandler.js
+  → orderService.saveOrder(userId, ...) → DB: status=PAYMENT_PENDING
+  → midtrans.createSnapTransaction(orderId, userId)
+  → orderService.updateOrderPayment()  → DB: simpan payment_url + qr_string
+  → Redis DEL order:{userId}:{telegramId}  ← hapus state order setelah selesai
+  → Bot kirim link pembayaran ke user via Telegram
 ```
 
 ---
 
-## Arsitektur Target (Multi-Tenant / SaaS) — M6
+## Flow Lengkap: Webhook Midtrans
 
-Setiap user (tenant = pemilik bisnis) memiliki bot instance-nya sendiri.
-Customer yang chat ke bot akan otomatis terlayani dengan config milik
-user yang memiliki bot tersebut.
+### 1. Notifikasi Masuk
 
 ```
-users tabel
-  id, email, plan, is_active
-       │
-       ├──► bot_credentials (user_id FK) → TELEGRAM_BOT_TOKEN per user
-       ├──► bot_config      (user_id FK) → AI mode, Gemini model per user
-       ├──► products        (user_id FK) → katalog produk per user
-       └──► orders          (user_id FK) → riwayat order per user
+Midtrans POST /api/webhook/midtrans
+```
 
-Bot Manager
-  ├── spawn(userId) → buat instance bot dengan token milik userId
-  ├── stop(userId)  → hentikan instance
-  └── Map<userId, BotInstance>
+### 2. Verifikasi Signature HMAC
 
-Tenant Resolver (saat pesan masuk)
-  incoming message
-       │
-       ▼
-  Cari user_id dari bot_token yang aktif
-       │
-       ▼
-  Load config + credentials userId tersebut
-       │
-       ▼
-  Proses pesan dalam konteks userId
+```js
+const expectedSig = SHA512(orderId + statusCode + grossAmount + serverKey)
+if (req.body.signature_key !== expectedSig) {
+  return res.status(403).end()
+}
+```
+
+> `serverKey` diambil dari Redis cache tenant (decrypt on-demand), bukan hardcoded.
+
+### 3. Idempotency Check
+
+```js
+const order = await db.orders.findUnique({ where: { orderId } })
+
+// Cegah proses duplikat (Midtrans retry bila tidak dapat 200)
+if (order.status === 'COMPLETED') {
+  return res.status(200).json({ message: 'already processed' })
+}
+```
+
+### 4. Update Database & Notifikasi
+
+```text
+DB: update order → status=COMPLETED, paid_at=now()
+  │
+  ├── botManager → kirim notif sukses ke buyer (via Telegram)
+  └── adminBot   → kirim notif ke admin / pemilik toko (tenant)
+  │
+  └── return HTTP 200 ke Midtrans
 ```
 
 ---
 
-## Database Schema (Saat Ini)
+## Redis — Skema Key & TTL
 
-```
-bot_config
-  id, ai_enabled, gemini_model, midtrans_is_production, is_active
+| Key                             | Isi                                                      | TTL        | Keterangan                           |
+| ------------------------------- | -------------------------------------------------------- | ---------- | ------------------------------------ |
+| `tenant_config:{userId}`        | JSON config + credentials (sudah didekripsi)             | 600 detik  | Invalidate saat tenant update config |
+| `order:{userId}:{telegramId}`   | JSON state order (IDLE / SELECTING / CONFIRMING + items) | 3600 detik | Auto-expire bila user tidak lanjut   |
+| `session:{userId}:{telegramId}` | Array riwayat chat Gemini (max 20 item)                  | 1800 detik | Reset via command `/reset`           |
+| `ratelimit:{ip}`                | Counter request (sliding window)                         | 60 detik   | Dikelola middleware rate limiter     |
+
+---
+
+## Database Schema (PostgreSQL)
+
+```text
+users (Tenant Utama)
+  id (UUID), email, password_hash, name, plan, is_active
   created_at, updated_at
+       │
+       ├──► bot_config      (userId FK) → Bot mode, AI mode, Gemini model, Midtrans env
+       ├──► bot_credentials (userId FK) → TELEGRAM_BOT_TOKEN, API keys (Terenkripsi AES-256-GCM)
+       ├──► products        (userId FK) → Katalog produk
+       └──► orders          (userId FK) → Riwayat transaksi
+
+bot_config
+  id, user_id (FK), bot_mode, ai_enabled, gemini_model, midtrans_is_production
+  is_active, created_at, updated_at
 
 bot_credentials
-  id, key (unique), value (encrypted AES-256-GCM)
+  id, user_id (FK), key (unique per user), value (terenkripsi AES-256-GCM)
   created_at, updated_at
 
-  Keys yang tersimpan:
-  - TELEGRAM_BOT_TOKEN
-  - ADMIN_BOT_TOKEN
-  - ADMIN_CHAT_ID
-  - GEMINI_API_KEY
-  - MIDTRANS_SERVER_KEY
-  - MIDTRANS_CLIENT_KEY
-
 products
-  id, name, description, price, emoji, is_available
+  id, user_id (FK), name, description, price, emoji, is_available
   created_at, updated_at
 
 orders
-  id, order_id (unique), telegram_id, username, first_name
-  total_price, status, payment_url, qr_string
-  midtrans_order_id, paid_at
+  id, user_id (FK), order_id (unique per user), telegram_id, username, first_name
+  total_price, status, payment_url, qr_string, midtrans_order_id, paid_at
   created_at, updated_at
 
 order_items
   id, order_id (FK), product_id (FK), quantity, unit_price
 ```
 
-## Database Schema Target (M6 — Multi-User)
-
-```
-users                              ← BARU
-  id, email, password_hash, name
-  plan, is_active
-  created_at, updated_at
-
-bot_config    + user_id FK         ← UPDATE
-bot_credentials + user_id FK       ← UPDATE
-products      + user_id FK         ← UPDATE
-orders        + user_id FK         ← UPDATE
-```
-
 ---
 
-## Alur Pembayaran
+## Enkripsi & Keamanan
 
-```
-User: /konfirmasi atau klik "Konfirmasi & Bayar"
-          │
-          ▼
-   saveOrder() → DB: status=PAYMENT_PENDING
-          │
-          ▼
-   createSnapTransaction() → Midtrans API
-          │
-          ▼
-   updateOrderPayment() → DB: simpan payment_url
-          │
-          ▼
-   Kirim pesan ke user: link pembayaran + tombol "Bayar Sekarang"
-          │
-    User bayar via Midtrans Snap
-          │
-          ▼
-   Midtrans POST ke /webhook/midtrans (ngrok → localhost:3000)
-          │
-          ▼
-   verifyWebhookSignature() → validasi dari Midtrans
-          │
-          ▼
-   DB: update status=COMPLETED, paidAt=now()
-          │
-          ├──► sendPaymentSuccessNotification() → user pembeli
-          └──► notifyAdminOrderSuccess()        → admin
-```
+**Algoritma:** AES-256-GCM (Authenticated Encryption)
 
----
-
-## Enkripsi Credentials
-
-**Algoritma:** AES-256-GCM (authenticated encryption)
+Semua token dan credential (Telegram, Midtrans, Gemini, Admin Bot) di tabel `bot_credentials` disimpan sebagai ciphertext.
 
 **Format di database:**
+
 ```
 iv:authTag:ciphertext
-(semua hex string, dipisah titik dua)
+(dipisah titik dua, base hex)
 ```
 
-**Flow:**
-```
-plaintext (misal: "SB-Mid-server-xxx")
-    │
-    ▼ encrypt(plaintext) — src/utils/encryption.js
-    │  · generate random 12-byte IV
-    │  · AES-256-GCM dengan ENCRYPTION_KEY dari .env
-    │
-    ▼
-"a1b2c3...:d4e5f6...:789abc..."  ← disimpan di DB
-    │
-    ▼ decrypt(encryptedString)
-    │
-    ▼
-plaintext kembali
+**Flow Enkripsi/Dekripsi:**
 
-Key source: ENCRYPTION_KEY (64 char hex = 32 bytes) di .env
-```
+- `ENCRYPTION_KEY` (64-karakter hex / 32 bytes) dari `.env` — tidak boleh berubah tanpa re-enkripsi ulang seluruh database.
+- Decrypt dilakukan di application layer saat cache miss, hasilnya disimpan ke Redis (tidak ke DB lagi).
+- Redis instance wajib tidak exposed ke publik — hanya accessible dari internal Docker network.
 
-**Penting:** `ENCRYPTION_KEY` tidak boleh berubah setelah credentials tersimpan.
-Simpan key ini di tempat aman (password manager, secret manager).
+**Validasi Webhook:**
+
+- Telegram: `X-Telegram-Bot-Api-Secret-Token` header divalidasi di setiap request.
+- Midtrans: HMAC SHA-512 signature diverifikasi menggunakan `serverKey` milik tenant.
 
 ---
 
-## In-Memory State
+## Alur Pembayaran (Midtrans) — Ringkasan
 
-Dua hal yang disimpan di memory (hilang saat bot restart):
+```text
+User klik "Konfirmasi & Bayar"
+  → orderService.saveOrder()          → DB: status=PAYMENT_PENDING
+  → midtrans.createSnapTransaction()  → Midtrans API
+  → orderService.updateOrderPayment() → DB: simpan payment_url + qr_string
+  → Redis DEL order state
+  → Bot kirim link pembayaran ke user
 
-| State | File | Isi | Reset |
-|---|---|---|---|
-| Order flow | `order.js` | State mesin tiap user (IDLE/SELECTING/CONFIRMING) | Selesai order / /batal |
-| Chat history | `session.js` | Riwayat pesan AI per user (max 20 pesan) | /reset |
+User bayar via Midtrans
+  → Midtrans POST /api/webhook/midtrans
+  → Verifikasi HMAC signature
+  → Idempotency check (skip bila sudah COMPLETED)
+  → DB: status=COMPLETED, paid_at=now()
+  → Notif buyer via bot
+  → Notif admin via adminBot
+  → HTTP 200 ke Midtrans
+```
 
-**Untuk production:** pertimbangkan Redis untuk persistensi session lintas restart.
+---
+
+## Docker Compose
+
+```yaml
+version: '3.8'
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://user:pass@postgres:5432/botdb?connection_limit=20&pool_timeout=10
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - '3000:3000'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:3000/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: botdb
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U user -d botdb']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  redis_data:
+  pg_data:
+```
+
+---
+
+## Graceful Shutdown
+
+```js
+// src/index.js
+process.on('SIGTERM', async () => {
+  console.log('[shutdown] SIGTERM received, draining...')
+
+  // Stop terima request baru
+  server.close()
+
+  // Tunggu request aktif selesai (max 30 detik)
+  await new Promise((resolve) => setTimeout(resolve, 30000))
+
+  // Tutup koneksi
+  await prisma.$disconnect()
+  await redis.quit()
+
+  console.log('[shutdown] Clean exit.')
+  process.exit(0)
+})
+```
+
+---
+
+## Health Check Endpoint
+
+```js
+// src/app.js
+app.get('/health', async (req, res) => {
+  const redisOk = await redis
+    .ping()
+    .then((r) => r === 'PONG')
+    .catch(() => false)
+  const dbOk = await prisma.$queryRaw`SELECT 1`
+    .then(() => true)
+    .catch(() => false)
+
+  const status = redisOk && dbOk ? 'ok' : 'degraded'
+  res.status(status === 'ok' ? 200 : 503).json({
+    status,
+    uptime: process.uptime(),
+    redis: redisOk,
+    db: dbOk,
+  })
+})
+```
+
+---
+
+## In-Memory State (Dihapus di v2)
+
+> State berikut **tidak lagi disimpan di memory Node.js**.
+> Keduanya telah dimigrasikan ke Redis agar survive restart dan aman untuk scale horizontal.
+
+| State                | v1 (lama)               | v2 (baru)                                              |
+| -------------------- | ----------------------- | ------------------------------------------------------ |
+| Order flow per buyer | `Map()` di `order.js`   | Redis key `order:{userId}:{telegramId}` TTL 1 jam      |
+| Chat history Gemini  | `Map()` di `session.js` | Redis key `session:{userId}:{telegramId}` TTL 30 menit |
+
+---
+
+## Catatan Scaling
+
+- **Horizontal scaling (k8s / multi-instance):** Aman. Semua state ada di Redis — tidak ada state lokal yang perlu di-sync antar instance.
+- **Redis persistence:** `appendonly yes` di Docker Compose memastikan data tidak hilang saat container restart.
+- **Connection pool Prisma:** Dikonfigurasi via `connection_limit=20` di `DATABASE_URL`. Sesuaikan dengan jumlah vCPU VPS.
+- **Rate limiting:** Implementasi sliding window via Redis key `ratelimit:{ip}` di middleware Express — tidak butuh library eksternal tambahan.
+- **Webhook vs Polling:** Full webhook mode menghilangkan N koneksi idle ke Telegram API. Tidak ada bot instance yang "menunggu" di memory.

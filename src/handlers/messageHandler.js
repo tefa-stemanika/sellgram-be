@@ -4,6 +4,7 @@
 import { askGemini } from '../services/gemini.js'
 import { getHistory, addMessage, clearHistory } from '../services/session.js'
 import { isAiEnabledForUser } from '../services/configService.js'
+import { redisSetNx } from '../services/redis.js'
 import {
   handleOrderInput,
   handleMenu,
@@ -18,6 +19,10 @@ import { handleCustomQtyInput } from './buttonHandler.js'
 
 export async function handleStart(bot, msg, userId) {
   const { id: chatId, first_name } = msg.chat
+
+  const dedupKey = `welcome_sent:${userId}:${chatId}`
+  const acquired = await redisSetNx(dedupKey, '1', 86400)
+  if (!acquired) return
 
   let text, keyboard
 
@@ -116,7 +121,7 @@ Perintah tersedia:
 export async function handleReset(bot, msg, userId) {
   const { id: chatId } = msg.chat
   const telegramId = msg.from.id
-  clearHistory(userId, telegramId)
+  await clearHistory(userId, telegramId)
   await bot.sendMessage(
     chatId,
     '🔄 Riwayat percakapan dihapus. Mulai dari awal!',
@@ -162,18 +167,18 @@ export async function handleMessage(bot, msg, userId) {
   await bot.sendChatAction(chatId, 'typing')
 
   try {
-    const history = getHistory(userId, telegramId)
-    addMessage(userId, telegramId, 'user', userText)
+    const history = await getHistory(userId, telegramId)
+    await addMessage(userId, telegramId, 'user', userText)
 
     const result = await askGemini(userText, userId, history)
 
     if (result.type === 'function_call') {
       await executeFunctionCall(bot, msg, userId, result.name, result.args)
-      addMessage(userId, telegramId, 'model', `[Aksi: ${result.name}]`)
+      await addMessage(userId, telegramId, 'model', `[Aksi: ${result.name}]`)
       return
     }
 
-    addMessage(userId, telegramId, 'model', result.text)
+    await addMessage(userId, telegramId, 'model', result.text)
     try {
       await bot.sendMessage(chatId, result.text, { parse_mode: 'Markdown' })
     } catch {
@@ -229,7 +234,7 @@ async function handlePesanDenganProduk(bot, msg, userId, productId, quantity) {
     '../services/productService.js'
   )
 
-  const current = getOrder(userId, telegramId)
+  const current = await getOrder(userId, telegramId)
   if (current.state !== ORDER_STATE.IDLE) {
     await bot.sendMessage(
       chatId,
@@ -248,7 +253,7 @@ async function handlePesanDenganProduk(bot, msg, userId, productId, quantity) {
     quantity <= 99
   ) {
     const total = product.price * quantity
-    setOrder(userId, telegramId, {
+    await setOrder(userId, telegramId, {
       state: ORDER_STATE.CONFIRMING,
       selectedProduct: product,
       quantity,
@@ -272,7 +277,7 @@ Ketik /batal untuk membatalkan`
     return
   }
 
-  setOrder(userId, telegramId, {
+  await setOrder(userId, telegramId, {
     state: ORDER_STATE.SELECTING_QTY,
     selectedProduct: product,
   })
