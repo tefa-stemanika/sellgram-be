@@ -18,9 +18,9 @@ const adminBots = new Map()
  * Initialize admin bot for a specific user (multi-tenant).
  * Return: BotInstance atau null jika tidak ada token.
  */
-export function initAdminBotForUser(userId) {
+export async function initAdminBotForUser(userId) {
   try {
-    const token = getAdminBotTokenForUser(userId)
+    const token = await getAdminBotTokenForUser(userId)
 
     if (!token) {
       console.warn(
@@ -51,7 +51,7 @@ export function initAdminBotForUser(userId) {
 export async function initAllAdminBots(userIds) {
   for (const userId of userIds) {
     try {
-      initAdminBotForUser(userId)
+      await initAdminBotForUser(userId)
     } catch (err) {
       console.error(`[AdminBot] Gagal init untuk user ${userId}:`, err.message)
     }
@@ -83,7 +83,7 @@ export async function notifyAdminOrderSuccessForUser(
     return
   }
 
-  const adminChatId = getAdminChatIdForUser(userId)
+  const adminChatId = await getAdminChatIdForUser(userId)
   if (!adminChatId) {
     console.warn(
       `⚠️  ADMIN_CHAT_ID tidak ditemukan untuk user ${userId} — notifikasi dilewati.`,
@@ -152,7 +152,7 @@ export async function notifyAdminOrderFailedForUser(userId, order) {
     return
   }
 
-  const adminChatId = getAdminChatIdForUser(userId)
+  const adminChatId = await getAdminChatIdForUser(userId)
   if (!adminChatId) return
 
   const item = order.orderItems?.[0]

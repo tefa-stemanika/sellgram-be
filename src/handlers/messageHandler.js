@@ -26,7 +26,7 @@ export async function handleStart(bot, msg, userId) {
 
   let text, keyboard
 
-  const aiEnabled = isAiEnabledForUser(userId)
+  const aiEnabled = await isAiEnabledForUser(userId)
 
   if (aiEnabled) {
     text = `👋 Halo, *${first_name}*!
@@ -77,7 +77,7 @@ export async function handleHelp(bot, msg, userId) {
 
   let text
 
-  const aiEnabled = isAiEnabledForUser(userId)
+  const aiEnabled = await isAiEnabledForUser(userId)
 
   if (aiEnabled) {
     text = `🤖 *Bantuan Bot*
@@ -137,7 +137,7 @@ export async function handleMessage(bot, msg, userId) {
 
   if (!userText) return
 
-  const aiEnabled = isAiEnabledForUser(userId)
+  const aiEnabled = await isAiEnabledForUser(userId)
 
   // ── Mode tanpa AI: hanya tangani input teks yang relevan dengan flow order ──
   if (!aiEnabled) {

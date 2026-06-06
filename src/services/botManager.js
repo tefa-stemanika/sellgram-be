@@ -196,7 +196,7 @@ function sleep(ms) {
 export async function configureTelegramWebhookForUser(userId, publicBaseUrl) {
   await loadConfigForUser(userId)
 
-  const token = getTelegramTokenForUser(userId)
+  const token = await getTelegramTokenForUser(userId)
   if (!token) {
     setObservability(userId, {
       running: false,
@@ -456,7 +456,7 @@ export async function spawnBotForUser(userId, options = {}) {
     }
 
     // Ambil token bot
-    const token = getTelegramTokenForUser(userId)
+    const token = await getTelegramTokenForUser(userId)
     if (!token) {
       console.error(
         `❌ TELEGRAM_BOT_TOKEN tidak ditemukan untuk user ${userId}.`,
@@ -661,7 +661,7 @@ export async function getBotObservabilityStatusForUser(
 ) {
   await loadConfigForUser(userId)
 
-  const token = getTelegramTokenForUser(userId)
+  const token = await getTelegramTokenForUser(userId)
   const running = isBotActive(userId)
 
   const current = setObservability(userId, { running })
@@ -688,7 +688,7 @@ export async function getBotObservabilityStatusForUser(
 
 export async function verifyTelegramWebhookSecretForUser(userId, secretToken) {
   await loadConfigForUser(userId)
-  const token = getTelegramTokenForUser(userId)
+  const token = await getTelegramTokenForUser(userId)
   if (!token) return false
 
   const expected = buildWebhookSecretFromToken(token)

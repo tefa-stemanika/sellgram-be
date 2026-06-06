@@ -53,8 +53,8 @@ const functionDeclarations = [
 
 export async function askGemini(userMessage, userId, conversationHistory = []) {
   // Baca config per-tenant (userId), bukan default user global.
-  const apiKey = getGeminiApiKeyForUser(userId)
-  const model = getGeminiModelForUser(userId)
+  const apiKey = await getGeminiApiKeyForUser(userId)
+  const model = await getGeminiModelForUser(userId)
 
   if (!apiKey)
     throw new Error('GEMINI_API_KEY tidak ditemukan di database credentials.')

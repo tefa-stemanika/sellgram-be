@@ -47,7 +47,7 @@ function getPublicBaseUrl(req) {
 }
 
 async function syncMainBotRuntime(userId) {
-  const token = getTelegramTokenForUser(userId)
+  const token = await getTelegramTokenForUser(userId)
 
   // Jika token belum ada/hilang, bot tidak bisa aktif.
   if (!token) {
@@ -98,7 +98,7 @@ async function refreshRuntimeIfNeeded(userId, key, req) {
     normalizedKey === 'ADMIN_BOT_TOKEN' ||
     normalizedKey === 'ADMIN_CHAT_ID'
   ) {
-    initAdminBotForUser(userId)
+    await initAdminBotForUser(userId)
   }
 
   // Tetap sinkronkan bot utama pada perubahan credential apa pun.
@@ -125,7 +125,7 @@ async function handleCredentialDeleteRuntime(userId, key) {
     normalizedKey === 'ADMIN_BOT_TOKEN' ||
     normalizedKey === 'ADMIN_CHAT_ID'
   ) {
-    initAdminBotForUser(userId)
+    await initAdminBotForUser(userId)
   }
 }
 

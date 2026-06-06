@@ -27,7 +27,7 @@ async function resolveMidtransContext(userId) {
 
   await loadConfigForUser(userId)
 
-  const serverKey = getMidtransServerKeyForUser(userId)
+  const serverKey = await getMidtransServerKeyForUser(userId)
   if (!serverKey)
     throw new Error(
       `MIDTRANS_SERVER_KEY tidak ditemukan di database credentials untuk user ${userId}.`,
@@ -35,7 +35,7 @@ async function resolveMidtransContext(userId) {
 
   return {
     authHeader: 'Basic ' + Buffer.from(serverKey + ':').toString('base64'),
-    isProduction: isMidtransProductionForUser(userId),
+    isProduction: await isMidtransProductionForUser(userId),
   }
 }
 
@@ -66,7 +66,7 @@ export async function createSnapTransaction({
     enabled_payments: ['qris', 'gopay', 'shopeepay', 'bank_transfer'],
     qris: { acquirer: 'gopay' },
     callbacks: {
-      finish: getCredentialForUser(userId, 'MIDTRANS_FINISH_URL') || process.env.MIDTRANS_FINISH_URL || 'https://t.me/',
+      finish: await getCredentialForUser(userId, 'MIDTRANS_FINISH_URL') || process.env.MIDTRANS_FINISH_URL || 'https://t.me/',
     },
   }
 
@@ -107,7 +107,7 @@ export async function checkTransactionStatus(userId, orderId) {
 export async function verifyWebhookSignature(userId, notification) {
   await loadConfigForUser(userId)
 
-  const serverKey = getMidtransServerKeyForUser(userId)
+  const serverKey = await getMidtransServerKeyForUser(userId)
   if (!serverKey) return false
 
   const { order_id, status_code, gross_amount, signature_key } = notification

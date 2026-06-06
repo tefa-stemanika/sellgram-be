@@ -2,18 +2,16 @@
 
 ## Stack
 
-Node.js 18+ ESM (`"type": "module"`), Express 5, Prisma + PostgreSQL, `node-telegram-bot-api`, native `fetch` for Gemini AI & Midtrans (no SDK). No linter/formatter configured.
+Node.js 18+ ESM (`"type": "module"`), Express 5, Prisma + PostgreSQL, `node-telegram-bot-api` (webhook-only, `polling: false`), native `fetch` for Gemini AI & Midtrans (no SDK). No linter/formatter.
 
-## Entrypoint & Startup
+## Startup
 
-- `src/index.js` — boots the system: init Redis client → init tenant map → spawn bot instances per active user → init admin bots → start Express API on `PORT` (default 3000, dev uses 5505). Graceful shutdown on SIGTERM/SIGINT: drain requests → close server → stop bots → quit Redis → disconnect Prisma.
-- `src/app.js` — creates Express app; `GET /health` endpoint (pings Redis + DB, returns 200/503) mounted **before** webhook routes; webhook routes mounted before API routes.
+- `src/index.js` — init Redis → init tenant map (Redis) → spawn bot instances → start Express on `PORT` (default 3000/5505 docker). Graceful shutdown: close server → stop bots → redisQuit → prisma.$disconnect.
+- `src/app.js` — `GET /health` (pings Redis + DB) mounted first, then webhook routes, then API routes.
 
 ## Environment
 
-`.env` must always contain `DATABASE_URL`, `ENCRYPTION_KEY` (64 hex chars, 32 bytes), `JWT_SECRET`, `REDIS_URL`, `PORT`. Credentials (bot tokens, API keys) are encrypted (AES-256-GCM) and stored in `bot_credentials` table — run `npm run db:seed-config` to migrate them from `.env`. After seed, credential env vars can be removed.
-
-`ENCRYPTION_KEY` must never change after credentials are stored.
+`DATABASE_URL`, `ENCRYPTION_KEY` (64 hex chars), `JWT_SECRET`, `REDIS_URL`, `PORT` required. Credentials encrypted (AES-256-GCM) in `bot_credentials`; `ENCRYPTION_KEY` must never change after encrypting. Run `npm run db:seed-config` to migrate `.env` credentials → DB, then strip credential env vars.
 
 ## Key Commands
 
@@ -22,42 +20,45 @@ Node.js 18+ ESM (`"type": "module"`), Express 5, Prisma + PostgreSQL, `node-tele
 | `npm run dev` | `node --watch src/index.js` |
 | `npm start` | `node src/index.js` |
 | `npm run build` / `postinstall` | `prisma generate` |
-| `npm run db:push` | Push Prisma schema to DB (no migration history — dev use) |
+| `npm run db:push` | Push Prisma schema (no migration history — dev) |
 | `npm run db:migrate` | `prisma migrate dev` |
 | `npm run db:seed` | Seed default products |
-| `npm run db:seed-config` | Migrate .env credentials → encrypted DB |
+| `npm run db:seed-config` | Migrate .env → encrypted DB |
 | `npm run db:studio` | Prisma Studio on port 5555 |
-| `npm run test:integration` | Multi-user isolation + order flow tests |
-| `npm run test:webhook` | Payment webhook notification tests |
+| `npm run test:integration` | Multi-user isolation + order flow |
+| `npm run test:webhook` | Payment webhook tests |
 | `npm run test:load` | Concurrent order/payment load tests |
-| `npm run test:phase5` | Runs all three test suites sequentially |
+| `npm run test:phase5` | All three suites sequentially |
 
 ## Architecture
 
-Multi-tenant SaaS: each `User` (tenant) has isolated bot config, credentials, products, orders. Bot instances are spawned per active user by `botManager.js`. `tenantResolver.js` maintains an in-memory map of `botToken → userId` built at startup.
+Multi-tenant: each `User` has isolated bot config, credentials, products, orders. Bot instances spawned per active user by `botManager.js`. **Tenant is resolved from the URL** (`/api/webhook/telegram/:userId`), not from Telegram bot token. `tenantResolver.js` uses `tenant_map:{sha256-token-hash}` keys in Redis (TTL 600s) for auxiliary reverse lookups only.
 
-Two bot runtime modes: **polling** (local dev, `bot_mode='polling'`) and **webhook** (production, uses `PUBLIC_BASE_URL`). Webhook mode calls `setWebhook` on Telegram API with retries + background reconciliation.
+Redis key patterns:
+- `order:{userId}:{telegramId}` — active order (TTL 3600s)
+- `session:{userId}:{telegramId}` — conversation state (TTL 1800s)
+- `webhook_queue:{userId}:{telegramId}` / `webhook_lock:{userId}:{telegramId}` — queue+lock serde (TTL 30s)
+- `welcome_sent:{userId}:{chatId}` — dedup (TTL 24h)
+- `ratelimit:{ip}` — sliding window (30 req/min)
+- `tenant_map:{hash}` — token→userId lookup (TTL 600s)
+- `tenant_config:{userId}` — config cache (TTL 600s)
+
+No polling mode — bot instances use `polling: false`. The `bot_mode` DB column exists but is never read by runtime code. Webhook is set on Telegram API via botManager at spawn time.
 
 ## Testing
 
-No test framework — plain ESM scripts. Tests create real DB records via `test-helpers.js` and clean up via `TestContext.cleanup()`. Requires running PostgreSQL with schema pushed.
+No framework — plain ESM scripts in `tests/`. Creates real DB records via `test-helpers.js`, cleans up via `TestContext.cleanup()`. Requires PostgreSQL with schema pushed.
 
-Important patterns from tests:
-- `telegramId` is Prisma `BigInt` — convert with `Number()` or `String()` for JSON/Telegram API
-- Order updates in webhook flow: `findFirst({ where: { orderId } })` → update by `id` (primary key, not composite key)
-- `midtransOrderId` uses same value as `orderId` (already unique per user) to avoid concurrent constraint violations
-- Delete order: `orderItem` → `order` → `product` → `user` (cascade order)
-
-## Database
-
-PostgreSQL via Prisma. Schema in `prisma/schema.prisma`. Composite unique constraints on `[userId, orderId]` and `[userId, key]` for credentials.
+Test patterns:
+- `telegramId` is Prisma `BigInt` — always convert with `Number()` for JSON/Telegram API
+- Order webhook flow: `findFirst({ where: { orderId } })` → update by primary `id`
+- `midtransOrderId` = same value as `orderId` (unique per user)
+- Delete cascade: `orderItem` → `order` → `product` → `user`
 
 ## Docker
 
-`docker compose up -d` starts postgres:16-alpine on port 5284 + redis:7-alpine + app container. App command: `npm run db:push && npm start`. Uses `.env.docker` for env vars.
+`docker compose up -d` — postgres:16-alpine (port 5284) + redis:7-alpine (AOF) + app (port 5505). App command: `npm run db:push && npm start`. Uses `.env.docker`.
 
 ## API
 
-Express routes under `/api`. Two notable patterns:
-- `webhookRouter` mounted before `apiRouter` in `app.js` to avoid auth middleware on webhook endpoints
-- JWT auth on dashboard endpoints via `auth.middleware.js`, tenant isolation via `req.user.id` in all queries
+Express routes under `/api`. `webhookRouter` mounted before `apiRouter` to skip JWT auth on webhooks. Dashboard endpoints use `auth.middleware.js` (JWT), tenant isolation via `req.user.id`.
