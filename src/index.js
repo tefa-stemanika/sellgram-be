@@ -2,6 +2,7 @@ import 'dotenv/config'
 import { createApp } from './app.js'
 import { getRedisClient, redisQuit } from './services/redis.js'
 import { initializeTenantMap } from './services/tenantResolver.js'
+import { startWorkers } from './services/workers.js'
 
 console.log('🚀 Telegram AI Bot — Multi-Tenant Mode (M6)\n')
 
@@ -28,6 +29,8 @@ if (activeUserIds.length > 0) {
   console.warn('⚠️  Tidak ada active users — admin bots tidak diinisialisasi.')
 }
 
+startWorkers()
+
 const port = parseInt(process.env.PORT || '3000')
 const app = createApp()
 const server = app.listen(port, () => {
@@ -47,6 +50,8 @@ setInterval(() => {
 async function shutdown(signal) {
   console.log(`\n⏹️  ${signal} diterima — shutdown...`)
   server.close()
+  const { stopWorkers } = await import('./services/workers.js')
+  await stopWorkers()
   await stopAllBots()
   await redisQuit()
   const { default: prisma } = await import('./services/db.js')

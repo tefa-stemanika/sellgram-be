@@ -4,12 +4,8 @@ import {
   isPaymentSuccess,
   isPaymentFailed,
 } from '../../services/midtrans.js'
+import { notifQueue } from '../../services/queue.js'
 import {
-  notifyAdminOrderSuccessForUser,
-  notifyAdminOrderFailedForUser,
-} from '../../services/adminBot.js'
-import {
-  getBotForUser,
   processTelegramWebhookUpdateForUser,
   verifyTelegramWebhookSecretForUser,
 } from '../../services/botManager.js'
@@ -64,12 +60,11 @@ export async function handleMidtransWebhook(req, res, next) {
 
       console.log('[Webhook] Pembayaran berhasil:', orderId, `(user ${userId})`)
 
-      const userBot = getBotForUser(userId)
-      if (userBot) {
-        await sendPaymentSuccessNotification(userBot, order)
-      }
-
-      await notifyAdminOrderSuccessForUser(userId, order, notification)
+      await notifQueue.add('payment-success', {
+        userId,
+        orderId: order.orderId,
+        notification,
+      })
     } else if (isPaymentFailed(notification)) {
       await prisma.order.update({
         where: { id: order.id },
@@ -82,12 +77,10 @@ export async function handleMidtransWebhook(req, res, next) {
         `(user ${userId})`,
       )
 
-      const userBot = getBotForUser(userId)
-      if (userBot) {
-        await sendPaymentFailedNotification(userBot, order)
-      }
-
-      await notifyAdminOrderFailedForUser(userId, order)
+      await notifQueue.add('payment-failed', {
+        userId,
+        orderId: order.orderId,
+      })
     }
 
     return res.status(200).json({ status: 'ok' })
@@ -129,38 +122,3 @@ export async function handleTelegramWebhook(req, res, next) {
   }
 }
 
-async function sendPaymentSuccessNotification(bot, order) {
-  const telegramId = Number(order.telegramId)
-  const item = order.orderItems?.[0]
-
-  const text = `✅ *Pembayaran Berhasil!*
-
-🔖 Order: \`${order.orderId}\`
-${item ? `${item.product.emoji} ${item.product.name} x${item.quantity}` : ''}
-💵 Total: Rp ${order.totalPrice.toLocaleString('id-ID')}
-
-Terima kasih! Pesananmu sedang kami proses. 🙏`
-
-  try {
-    await bot.sendMessage(telegramId, text, { parse_mode: 'Markdown' })
-  } catch (err) {
-    console.error('[Webhook] Gagal kirim notif user:', err.message)
-  }
-}
-
-async function sendPaymentFailedNotification(bot, order) {
-  const telegramId = Number(order.telegramId)
-
-  const text = `❌ *Pembayaran Gagal/Expired*
-
-🔖 Order: \`${order.orderId}\`
-
-Pembayaran tidak berhasil atau sudah kadaluarsa.
-Ketik /pesan untuk membuat order baru.`
-
-  try {
-    await bot.sendMessage(telegramId, text, { parse_mode: 'Markdown' })
-  } catch (err) {
-    console.error('[Webhook] Gagal kirim notif gagal user:', err.message)
-  }
-}
