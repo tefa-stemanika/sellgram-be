@@ -44,10 +44,7 @@ enum UserPlan {
 model BotConfig {
   id               String   @id @default(uuid()) @db.Uuid
   userId           String   @map("user_id") @db.Uuid
-  // Telegram
-  botMode          String   @default("polling") @map("bot_mode") @db.VarChar(20)
-  aiEnabled        Boolean  @default(false) @map("ai_enabled")
-  geminiModel      String   @default("gemini-2.0-flash") @map("gemini_model") @db.VarChar(50)
+  mode             BotMode  @default(BUTTON)
   // Midtrans
   midtransIsProduction Boolean @default(false) @map("midtrans_is_production")
   // Meta
@@ -61,6 +58,11 @@ model BotConfig {
   @@map("bot_config")
 }
 
+enum BotMode {
+  AI
+  BUTTON
+}
+
 // ── Bot Credentials ───────────────────────────────────────────────────────────
 // Menyimpan credentials sensitif — nilai disimpan TERENKRIPSI (AES-256-GCM).
 // Setiap user memiliki credentials sendiri (user_id FK).
@@ -69,7 +71,7 @@ model BotCredential {
   id        String   @id @default(uuid()) @db.Uuid
   userId    String   @map("user_id") @db.Uuid
   key       String   @db.VarChar(100)
-  value     String   @db.Text     // AES-256-GCM encrypted: "iv:authTag:ciphertext"
+  value     String?  @db.Text     // AES-256-GCM encrypted: "iv:authTag:ciphertext" (nullable)
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

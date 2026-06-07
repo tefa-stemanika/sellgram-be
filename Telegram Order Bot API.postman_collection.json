@@ -237,7 +237,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"botMode\": \"polling\",\n  \"aiEnabled\": true,\n  \"geminiModel\": \"gemini-2.0-flash\",\n  \"midtransIsProduction\": false\n}",
+              "raw": "{\n  \"midtransIsProduction\": false\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -268,7 +268,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"aiEnabled\": false,\n  \"botMode\": \"polling\"\n}",
+              "raw": "{\n  \"midtransIsProduction\": true\n}",
               "options": {
                 "raw": {
                   "language": "json"

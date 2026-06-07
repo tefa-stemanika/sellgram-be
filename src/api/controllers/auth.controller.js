@@ -5,7 +5,6 @@ import {
   verifyUserPassword,
 } from '../../services/userService.js'
 import prisma from '../../services/db.js'
-import { encrypt } from '../../utils/encryption.js'
 import { signAuthToken } from '../../utils/jwt.js'
 import { ok, fail } from '../utils/response.js'
 
@@ -13,9 +12,10 @@ const DEFAULT_CREDENTIAL_KEYS = [
   'TELEGRAM_BOT_TOKEN',
   'ADMIN_BOT_TOKEN',
   'ADMIN_CHAT_ID',
-  'GEMINI_API_KEY',
-  'MIDTRANS_SERVER_KEY',
-  'MIDTRANS_CLIENT_KEY',
+  'MIDTRANS_SERVER_KEY_SANDBOX',
+  'MIDTRANS_CLIENT_KEY_SANDBOX',
+  'MIDTRANS_SERVER_KEY_PRODUCTION',
+  'MIDTRANS_CLIENT_KEY_PRODUCTION',
   'MIDTRANS_FINISH_URL',
 ]
 
@@ -61,20 +61,16 @@ export async function register(req, res, next) {
     await prisma.botConfig.create({
       data: {
         userId: user.id,
-        aiEnabled: false,
-        geminiModel: 'gemini-2.0-flash',
         midtransIsProduction: false,
-        botMode: 'webhook',
         isActive: true,
       },
     })
 
-    const encryptedEmpty = encrypt('')
     await prisma.botCredential.createMany({
       data: DEFAULT_CREDENTIAL_KEYS.map((key) => ({
         userId: user.id,
         key,
-        value: encryptedEmpty,
+        value: '',
       })),
       skipDuplicates: true,
     })

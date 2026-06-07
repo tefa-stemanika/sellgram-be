@@ -1,9 +1,5 @@
-// src/handlers/messageHandler.js
-// Multi-tenant message handler — mendukung multiple users dengan config terpisah
-
-import { askGemini } from '../services/gemini.js'
 import { getHistory, addMessage, clearHistory } from '../services/session.js'
-import { isAiEnabledForUser } from '../services/configService.js'
+import { isAiEnabledForUser, askAI } from '../services/aiProvider.js'
 import { redisSetNx } from '../services/redis.js'
 import {
   handleOrderInput,
@@ -160,7 +156,7 @@ export async function handleMessage(bot, msg, userId) {
     return
   }
 
-  // ── Mode AI: proses natural language dengan Gemini ────────────────────────
+  // ── Mode AI: proses natural language dengan OpenRouter ────────────────────
   const handledByOrder = await handleOrderInput(bot, msg, userId)
   if (handledByOrder) return
 
@@ -170,7 +166,7 @@ export async function handleMessage(bot, msg, userId) {
     const history = await getHistory(userId, telegramId)
     await addMessage(userId, telegramId, 'user', userText)
 
-    const result = await askGemini(userText, userId, history)
+    const result = await askAI(userText, userId, history)
 
     if (result.type === 'function_call') {
       await executeFunctionCall(bot, msg, userId, result.name, result.args)

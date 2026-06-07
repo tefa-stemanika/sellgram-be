@@ -96,29 +96,28 @@ export async function getAdminChatIdForUser(userId) {
   return getCredentialForUser(userId, 'ADMIN_CHAT_ID')
 }
 
-export async function getGeminiApiKeyForUser(userId) {
-  return getCredentialForUser(userId, 'GEMINI_API_KEY')
-}
-
 export async function getMidtransServerKeyForUser(userId) {
-  return getCredentialForUser(userId, 'MIDTRANS_SERVER_KEY')
+  const config = await getBotConfigForUser(userId)
+  const key = config?.midtransIsProduction
+    ? 'MIDTRANS_SERVER_KEY_PRODUCTION'
+    : 'MIDTRANS_SERVER_KEY_SANDBOX'
+  return getCredentialForUser(userId, key)
 }
 
 export async function getMidtransClientKeyForUser(userId) {
-  return getCredentialForUser(userId, 'MIDTRANS_CLIENT_KEY')
-}
-
-export async function getGeminiModelForUser(userId) {
   const config = await getBotConfigForUser(userId)
-  return config?.geminiModel || 'gemini-2.0-flash'
-}
-
-export async function isAiEnabledForUser(userId) {
-  const config = await getBotConfigForUser(userId)
-  return config?.aiEnabled ?? false
+  const key = config?.midtransIsProduction
+    ? 'MIDTRANS_CLIENT_KEY_PRODUCTION'
+    : 'MIDTRANS_CLIENT_KEY_SANDBOX'
+  return getCredentialForUser(userId, key)
 }
 
 export async function isMidtransProductionForUser(userId) {
   const config = await getBotConfigForUser(userId)
   return config?.midtransIsProduction || false
+}
+
+export async function getBotModeForUser(userId) {
+  const config = await getBotConfigForUser(userId)
+  return config?.mode || 'AI'
 }

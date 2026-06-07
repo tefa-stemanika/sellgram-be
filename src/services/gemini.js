@@ -1,10 +1,4 @@
-// src/services/gemini.js
-
 import { getAllProducts, formatRupiah } from './productService.js'
-import {
-  getGeminiApiKeyForUser,
-  getGeminiModelForUser,
-} from './configService.js'
 
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
 
@@ -52,12 +46,11 @@ const functionDeclarations = [
 ]
 
 export async function askGemini(userMessage, userId, conversationHistory = []) {
-  // Baca config per-tenant (userId), bukan default user global.
-  const apiKey = await getGeminiApiKeyForUser(userId)
-  const model = await getGeminiModelForUser(userId)
+  const apiKey = process.env.GEMINI_API_KEY
+  const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash'
 
   if (!apiKey)
-    throw new Error('GEMINI_API_KEY tidak ditemukan di database credentials.')
+    throw new Error('GEMINI_API_KEY tidak ditemukan di environment.')
 
   const products = await getAllProducts(userId)
   const productContext = products

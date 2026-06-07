@@ -43,7 +43,7 @@ Redis key patterns:
 - `tenant_map:{hash}` — token→userId lookup (TTL 600s)
 - `tenant_config:{userId}` — config cache (TTL 600s)
 
-No polling mode — bot instances use `polling: false`. The `bot_mode` DB column exists but is never read by runtime code. Webhook is set on Telegram API via botManager at spawn time.
+Webhook-only — bot instances use `polling: false`. Webhook is set on Telegram API via botManager at spawn time.
 
 ## Testing
 

@@ -222,7 +222,7 @@ users (Tenant Utama)
        └──► orders          (userId FK) → Riwayat transaksi
 
 bot_config
-  id, user_id (FK), bot_mode, ai_enabled, gemini_model, midtrans_is_production
+  id, user_id (FK), midtrans_is_production
   is_active, created_at, updated_at
 
 bot_credentials

@@ -25,6 +25,7 @@
     "seed": "node prisma/seed.js"
   },
   "dependencies": {
+    "@openrouter/sdk": "^0.12.79",
     "@prisma/client": "^5.14.0",
     "bcrypt": "^5.1.1",
     "bullmq": "^5.78.0",

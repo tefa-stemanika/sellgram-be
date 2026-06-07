@@ -39,10 +39,10 @@ export async function createBotConfig(req, res, next) {
   try {
     const userId = req.auth.userId
     const data = {
-      botMode: 'webhook',
-      aiEnabled: req.body?.aiEnabled ?? false,
-      geminiModel: req.body?.geminiModel || 'gemini-2.0-flash',
       midtransIsProduction: req.body?.midtransIsProduction ?? false,
+      mode: (req.body?.mode && ['AI', 'BUTTON'].includes(req.body.mode))
+        ? req.body.mode
+        : 'BUTTON',
       isActive: true,
     }
 
@@ -78,15 +78,11 @@ export async function updateBotConfig(req, res, next) {
     }
 
     const patch = {
-      botMode: 'webhook',
-      ...(req.body?.aiEnabled !== undefined && {
-        aiEnabled: req.body.aiEnabled,
-      }),
-      ...(req.body?.geminiModel !== undefined && {
-        geminiModel: req.body.geminiModel,
-      }),
       ...(req.body?.midtransIsProduction !== undefined && {
         midtransIsProduction: req.body.midtransIsProduction,
+      }),
+      ...(req.body?.mode && ['AI', 'BUTTON'].includes(req.body.mode) && {
+        mode: req.body.mode,
       }),
       ...(req.body?.isActive !== undefined && { isActive: req.body.isActive }),
     }

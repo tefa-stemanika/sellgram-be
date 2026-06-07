@@ -102,10 +102,7 @@ export async function createTestUser(ctx, overrides = {}) {
   await prisma.botConfig.create({
     data: {
       userId: user.id,
-      aiEnabled: true,
-      geminiModel: 'gemini-2.0-flash',
       midtransIsProduction: false,
-      botMode: 'webhook',
       isActive: true,
     },
   })

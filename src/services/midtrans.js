@@ -30,7 +30,7 @@ async function resolveMidtransContext(userId) {
   const serverKey = await getMidtransServerKeyForUser(userId)
   if (!serverKey)
     throw new Error(
-      `MIDTRANS_SERVER_KEY tidak ditemukan di database credentials untuk user ${userId}.`,
+      `Midtrans server key tidak ditemukan di database credentials untuk user ${userId}.`,
     )
 
   return {

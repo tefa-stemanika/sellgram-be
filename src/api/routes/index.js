@@ -6,6 +6,7 @@ import botCredentialRouter from './botCredential.routes.js'
 import ordersRouter from './orders.routes.js'
 import productsRouter from './products.routes.js'
 import botsRouter from './bots.routes.js'
+import dashboardRouter from './dashboard.routes.js'
 
 const apiRouter = Router()
 
@@ -16,5 +17,6 @@ apiRouter.use(botCredentialRouter)
 apiRouter.use(ordersRouter)
 apiRouter.use(productsRouter)
 apiRouter.use(botsRouter)
+apiRouter.use(dashboardRouter)
 
 export default apiRouter
