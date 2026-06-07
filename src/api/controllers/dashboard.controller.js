@@ -28,6 +28,10 @@ export async function getDashboard(req, res, next) {
       currentRevenue,
       prevRevenue,
       recentOrders,
+      telegramOrders,
+      websiteOrders,
+      telegramRevenue,
+      websiteRevenue,
     ] = await Promise.all([
       prisma.product.count({ where: { userId, isAvailable: true } }),
       prisma.order.count({ where: { userId } }),
@@ -41,14 +45,27 @@ export async function getDashboard(req, res, next) {
         select: {
           id: true,
           orderId: true,
+          source: true,
           firstName: true,
           username: true,
+          customerName: true,
+          customerPhone: true,
           status: true,
           totalPrice: true,
           createdAt: true,
         },
         orderBy: { createdAt: 'desc' },
         take: 5,
+      }),
+      prisma.order.count({ where: { userId, source: 'TELEGRAM' } }),
+      prisma.order.count({ where: { userId, source: 'WEBSITE' } }),
+      prisma.order.aggregate({
+        where: { userId, source: 'TELEGRAM', status: 'COMPLETED' },
+        _sum: { totalPrice: true },
+      }),
+      prisma.order.aggregate({
+        where: { userId, source: 'WEBSITE', status: 'COMPLETED' },
+        _sum: { totalPrice: true },
       }),
     ])
 
@@ -69,6 +86,14 @@ export async function getDashboard(req, res, next) {
       pendingOrders,
       totalRevenue: currentRevenue,
       revenueChange: { percentage, trend },
+      ordersBySource: {
+        TELEGRAM: telegramOrders,
+        WEBSITE: websiteOrders,
+      },
+      revenueBySource: {
+        TELEGRAM: telegramRevenue._sum.totalPrice ?? 0,
+        WEBSITE: websiteRevenue._sum.totalPrice ?? 0,
+      },
       recentOrders,
     })
   } catch (error) {

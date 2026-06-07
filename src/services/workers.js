@@ -31,7 +31,7 @@ export function startWorkers() {
     const bot = getBotForUser(data.userId)
 
     if (job.name === 'payment-success') {
-      if (bot) {
+      if (bot && order.source !== 'WEBSITE') {
         const telegramId = Number(order.telegramId)
         const item = order.orderItems?.[0]
         const text = `✅ *Pembayaran Berhasil!*\n\n🔖 Order: \`${order.orderId}\`\n${item ? `${item.product.emoji} ${item.product.name} x${item.quantity}` : ''}\n💵 Total: Rp ${order.totalPrice.toLocaleString('id-ID')}\n\nTerima kasih! Pesananmu sedang kami proses. 🙏`
@@ -45,7 +45,7 @@ export function startWorkers() {
 
       await notifyAdminOrderSuccessForUser(data.userId, order, data.notification)
     } else if (job.name === 'payment-failed') {
-      if (bot) {
+      if (bot && order.source !== 'WEBSITE') {
         const telegramId = Number(order.telegramId)
         const text = `❌ *Pembayaran Gagal/Expired*\n\n🔖 Order: \`${order.orderId}\`\n\nPembayaran tidak berhasil atau sudah kadaluarsa.\nKetik /pesan untuk membuat order baru.`
 

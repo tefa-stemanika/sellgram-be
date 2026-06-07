@@ -2,6 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import apiRouter from './api/routes/index.js'
 import webhookRouter from './api/routes/webhook.routes.js'
+import publicRouter from './api/routes/public.routes.js'
 import { requestLogger } from './api/middlewares/requestLogger.middleware.js'
 import { notFoundHandler } from './api/middlewares/notFound.middleware.js'
 import { errorHandler } from './api/middlewares/error.middleware.js'
@@ -34,6 +35,7 @@ export function createApp() {
   })
 
   app.use('/api', webhookRouter)
+  app.use('/api', publicRouter)
   app.use('/api', apiRouter)
 
   app.use(notFoundHandler)

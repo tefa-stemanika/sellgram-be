@@ -102,13 +102,21 @@ model Product {
 
 // ── Orders ────────────────────────────────────────────────────────────────────
 
+enum OrderSource {
+  TELEGRAM
+  WEBSITE
+}
+
 model Order {
   id              String      @id @default(uuid()) @db.Uuid
   userId          String      @map("user_id") @db.Uuid
   orderId         String      @map("order_id") @db.VarChar(30)
-  telegramId      BigInt      @map("telegram_id")
+  source          OrderSource @default(TELEGRAM)
+  telegramId      BigInt?     @map("telegram_id")
   username        String?     @db.VarChar(100)
   firstName       String?     @map("first_name") @db.VarChar(100)
+  customerName    String?     @map("customer_name") @db.VarChar(100)
+  customerPhone   String?     @map("customer_phone") @db.VarChar(20)
   totalPrice      Int         @map("total_price")
   status          OrderStatus @default(PENDING)
   paymentUrl      String?     @map("payment_url") @db.Text

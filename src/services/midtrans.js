@@ -60,8 +60,9 @@ export async function createSnapTransaction({
       },
     ],
     customer_details: {
-      first_name: customer.firstName || 'Pelanggan',
+      first_name: customer.firstName || customer.name || 'Pelanggan',
       email: customer.email || `${orderId.toLowerCase()}@bot.com`,
+      ...(customer.phone && { phone: customer.phone }),
     },
     enabled_payments: ['qris', 'gopay', 'shopeepay', 'bank_transfer'],
     qris: { acquirer: 'gopay' },

@@ -279,6 +279,222 @@ curl -X POST http://localhost:3000/api/bots/restart \
 
 ---
 
+## Public API (No Auth)
+
+Public endpoints untuk web catalog & checkout. Tidak memerlukan JWT token. Semua endpoint dilindungi rate limit (30 req/min per IP).
+
+### GET /api/public/profile/:userId
+
+Profil toko untuk halaman public. Digunakan untuk menampilkan nama toko (e.g. "Selamat datang di toko [name]").
+
+```bash
+curl http://localhost:3000/api/public/profile/0a1b2c3d-...
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "message": "Get user profile success",
+  "data": {
+    "name": "Toko Sejahtera"
+  }
+}
+```
+
+---
+
+### GET /api/public/products/:userId
+
+Daftar produk yang tersedia (hanya produk dengan `isAvailable = true`).
+
+```bash
+curl http://localhost:3000/api/public/products/0a1b2c3d-...
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "message": "Get products success",
+  "data": [
+    {
+      "id": "uuid",
+      "name": "Converse Chuck 70",
+      "description": "Sepatu canvas klasik high-top",
+      "price": 450000,
+      "emoji": "👟",
+      "isAvailable": true,
+      "createdAt": "2026-06-07T10:30:00.000Z"
+    },
+    {
+      "id": "uuid",
+      "name": "Nike Air Force 1",
+      "description": "Sepatu sneakers ikonik",
+      "price": 750000,
+      "emoji": "👟",
+      "isAvailable": true,
+      "createdAt": "2026-06-07T10:30:00.000Z"
+    }
+  ]
+}
+```
+
+---
+
+### GET /api/public/products/:userId/:productId
+
+Detail satu produk.
+
+```bash
+curl http://localhost:3000/api/public/products/0a1b2c3d.../uuid-product
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "message": "Get product success",
+  "data": {
+    "id": "uuid",
+    "name": "Converse Chuck 70",
+    "description": "Sepatu canvas klasik high-top",
+    "price": 450000,
+    "emoji": "👟",
+    "isAvailable": true,
+    "createdAt": "2026-06-07T10:30:00.000Z"
+  }
+}
+```
+
+---
+
+### POST /api/public/orders
+
+Membuat order baru dari website. Menghasilkan payment URL Midtrans Snap untuk redirect pembayaran.
+
+```bash
+curl -X POST http://localhost:3000/api/public/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "userId": "0a1b2c3d-...",
+    "productId": "uuid-product",
+    "quantity": 2,
+    "customerName": "Budi Santoso",
+    "customerPhone": "08123456789"
+  }'
+```
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `userId` | string | yes | ID tenant (pemilik toko) |
+| `productId` | string | yes | ID produk yang dibeli |
+| `quantity` | number | yes | Jumlah (1-99) |
+| `customerName` | string | yes | Nama pembeli |
+| `customerPhone` | string | no | Nomor HP pembeli |
+
+Response (201):
+
+```json
+{
+  "success": true,
+  "message": "Order created successfully",
+  "data": {
+    "orderId": "INV-20240601-001",
+    "paymentUrl": "https://app.sandbox.midtrans.com/snap/v2/redirection/snap-token",
+    "snapToken": "snap-token-xyz",
+    "totalPrice": 900000
+  }
+}
+```
+
+Frontend harus me-redirect user ke `paymentUrl` (Midtrans Snap) setelah order berhasil dibuat.
+
+---
+
+### GET /api/public/orders/:orderId
+
+Cek status order setelah pembayaran. Berguna untuk halaman redirect/sukses di frontend setelah user selesai bayar di Midtrans.
+
+```bash
+curl http://localhost:3000/api/public/orders/INV-20240601-001
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "message": "Get order status success",
+  "data": {
+    "orderId": "INV-20240601-001",
+    "source": "WEBSITE",
+    "status": "PAYMENT_PENDING",
+    "totalPrice": 900000,
+    "paymentUrl": "https://app.sandbox.midtrans.com/snap/v2/redirection/snap-token",
+    "customerName": "Budi Santoso",
+    "customerPhone": "08123456789",
+    "paidAt": null,
+    "createdAt": "2026-06-07T10:30:00.000Z"
+  }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `orderId` | string | Nomor invoice |
+| `source` | string | `"WEBSITE"` untuk order dari web |
+| `status` | string | Status payment (lihat referensi di bawah) |
+| `totalPrice` | number | Total harga dalam rupiah |
+| `paymentUrl` | string? | URL pembayaran Midtrans Snap |
+| `customerName` | string? | Nama pembeli |
+| `customerPhone` | string? | Nomor HP pembeli |
+| `paidAt` | string (ISO) | Waktu pembayaran (null jika belum bayar) |
+| `createdAt` | string (ISO) | Waktu order dibuat |
+
+### POST /api/public/orders/:orderId/verify
+
+Verifikasi pembayaran langsung ke Midtrans API. Panggil endpoint ini dari frontend **setelah user selesai redirect** dari Snap (saat halaman sukses/gagal dimuat). Endpoint ini mengecek status transaksi ke Midtrans dan mengupdate status order di database.
+
+```bash
+curl -X POST http://localhost:3000/api/public/orders/INV-20240601-001
+```
+
+Response (pembayaran berhasil):
+
+```json
+{
+  "success": true,
+  "message": "Payment verified successfully",
+  "data": {
+    "status": "COMPLETED"
+  }
+}
+```
+
+Response (pembayaran masih pending):
+
+```json
+{
+  "success": true,
+  "message": "Payment still pending",
+  "data": {
+    "status": "PAYMENT_PENDING"
+  }
+}
+```
+
+**Saran implementasi frontend:** Panggil endpoint ini di halaman redirect/sukses setelah Snap. Jika status `COMPLETED`, tampilkan halaman sukses. Jika masih `PAYMENT_PENDING`, polling setiap 3 detik sampai status berubah atau timeout 30 detik.
+
+---
+
+
+
 ## Health
 
 ### GET /api/health
