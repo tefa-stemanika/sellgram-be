@@ -27,6 +27,10 @@ model User {
   credentials  BotCredential[]
   products     Product[]
   orders       Order[]
+  tickets      Ticket[]
+  labels       Label[]
+  comments     TicketComment[]
+  activities   TicketActivity[]
 
   @@map("users")
 }
@@ -128,6 +132,7 @@ model Order {
 
   user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   orderItems OrderItem[]
+  ticket     Ticket?
 
   @@unique([userId, orderId])
   @@unique([userId, midtransOrderId])
@@ -155,4 +160,109 @@ enum OrderStatus {
   CANCELLED
   PAYMENT_PENDING
   PAYMENT_FAILED
+}
+
+// ── Ticketing ─────────────────────────────────────────────────────────────────
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_CUSTOMER
+  RESOLVED
+  CLOSED
+  CANCELLED
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TicketSource {
+  ORDER
+  MANUAL
+}
+
+model Ticket {
+  id              String        @id @default(uuid()) @db.Uuid
+  userId          String        @map("user_id") @db.Uuid
+  orderId         String?       @unique @map("order_id") @db.Uuid
+  title           String        @db.VarChar(255)
+  description     String?       @db.Text
+  status          TicketStatus  @default(OPEN)
+  priority        TicketPriority @default(MEDIUM)
+  source          TicketSource  @default(ORDER)
+  customerName    String?       @map("customer_name") @db.VarChar(100)
+  customerContact String?       @map("customer_contact") @db.VarChar(100)
+  resolvedAt      DateTime?     @map("resolved_at")
+  closedAt        DateTime?     @map("closed_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order      Order?           @relation(fields: [orderId], references: [id])
+  labels     TicketLabel[]
+  comments   TicketComment[]
+  activities TicketActivity[]
+
+  @@index([userId, status])
+  @@index([userId, createdAt])
+  @@map("tickets")
+}
+
+model Label {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  name      String   @db.VarChar(50)
+  color     String   @db.VarChar(7) @default("#3B82F6")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tickets TicketLabel[]
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, name])
+  @@map("labels")
+}
+
+model TicketLabel {
+  ticketId String @map("ticket_id") @db.Uuid
+  labelId  String @map("label_id") @db.Uuid
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  label  Label  @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@id([ticketId, labelId])
+  @@map("ticket_labels")
+}
+
+model TicketComment {
+  id         String   @id @default(uuid()) @db.Uuid
+  ticketId   String   @map("ticket_id") @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  body       String   @db.Text
+  isInternal Boolean  @default(false) @map("is_internal")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@index([ticketId, createdAt])
+  @@map("ticket_comments")
+}
+
+model TicketActivity {
+  id        String   @id @default(uuid()) @db.Uuid
+  ticketId  String   @map("ticket_id") @db.Uuid
+  userId    String?  @map("user_id") @db.Uuid
+  action    String   @db.VarChar(50)
+  metadata  Json?    @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at")
+
+  ticket Ticket  @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user   User?   @relation(fields: [userId], references: [id])
+
+  @@map("ticket_activities")
 }

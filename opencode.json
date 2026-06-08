@@ -2,6 +2,6 @@
     "$schema": "https://opencode.ai/config.json",
     "instructions": [
         "PLANS.md",
-        "ARCHITECTURE_V2.md"
+        "ARCHITECTURE.md"
     ]
 }
