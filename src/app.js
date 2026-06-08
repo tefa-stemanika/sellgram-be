@@ -5,6 +5,7 @@ import webhookRouter from './api/routes/webhook.routes.js'
 import publicRouter from './api/routes/public.routes.js'
 import ticketRouter from './api/routes/ticketRoutes.js'
 import labelRouter from './api/routes/labelRoutes.js'
+import customerRouter from './api/routes/customerRoutes.js'
 import { requestLogger } from './api/middlewares/requestLogger.middleware.js'
 import { notFoundHandler } from './api/middlewares/notFound.middleware.js'
 import { errorHandler } from './api/middlewares/error.middleware.js'
@@ -40,6 +41,7 @@ export function createApp() {
   app.use('/api', publicRouter)
   app.use('/api/tickets', ticketRouter)
   app.use('/api/labels', labelRouter)
+  app.use('/api/customers', customerRouter)
   app.use('/api', apiRouter)
 
   app.use(notFoundHandler)

@@ -6,6 +6,7 @@ const router = Router()
 router.use(requireAuth)
 
 router.get('/', tc.listTickets)
+router.get('/status/:status', tc.listTicketsByStatus)
 router.get('/:ticketId', tc.getTicket)
 router.patch('/:ticketId/status', tc.changeStatus)
 router.patch('/:ticketId/priority', tc.changePriority)

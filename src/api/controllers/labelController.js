@@ -1,9 +1,10 @@
-import { ok, fail } from '../utils/response.js'
+import { ok, okPaginated, fail } from '../utils/response.js'
 import * as labelService from '../../services/labelService.js'
 
 export async function list(req, res, next) {
   try {
-    return ok(res, await labelService.getLabels(req.auth.userId))
+    const { labels, total, page, limit } = await labelService.getLabels(req.auth.userId, req.query)
+    return okPaginated(res, labels, total, page, limit)
   } catch (error) {
     return next(error)
   }

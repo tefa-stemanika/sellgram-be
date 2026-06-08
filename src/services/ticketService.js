@@ -31,7 +31,9 @@ export async function createTicketFromOrder(order, userId) {
 }
 
 export async function getTickets(userId, filters = {}) {
-  const { status, priority, labelId, search, page = 1, limit = 20 } = filters
+  const { status, priority, labelId, search } = filters
+  const page = Math.max(1, Number(filters.page) || 1)
+  const limit = Math.max(1, Math.min(100, Number(filters.limit) || 20))
 
   const where = {
     userId,

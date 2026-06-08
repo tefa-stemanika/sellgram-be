@@ -2,6 +2,7 @@ import { Worker } from 'bullmq'
 import { getBotForUser, configureTelegramWebhookForUser, scheduleTelegramWebhookReconcileForUser } from './botManager.js'
 import { notifyAdminOrderSuccessForUser, notifyAdminOrderFailedForUser } from './adminBot.js'
 import { createTicketFromOrder } from './ticketService.js'
+import { upsertCustomerFromOrder } from './customerService.js'
 import prisma from './db.js'
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379'
@@ -46,6 +47,10 @@ export function startWorkers() {
 
       await createTicketFromOrder(order, data.userId).catch(err => {
         console.error('[Worker] Gagal buat ticket:', err.message)
+      })
+
+      await upsertCustomerFromOrder(order, data.userId).catch(err => {
+        console.error('[Worker] Gagal upsert customer:', err.message)
       })
 
       await notifyAdminOrderSuccessForUser(data.userId, order, data.notification)

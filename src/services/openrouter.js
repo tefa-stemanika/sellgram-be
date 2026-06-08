@@ -87,7 +87,7 @@ export async function askOpenRouter(userMessage, userId, conversationHistory = [
   if (!apiKey)
     throw new Error('OPENROUTER_API_KEY tidak ditemukan di environment.')
 
-  const products = await getAllProducts(userId)
+  const { products } = await getAllProducts(userId)
   const productContext = products
     .map((p) => `- ID ${p.id}: ${p.name} (${formatRupiah(p.price)})`)
     .join('\n')

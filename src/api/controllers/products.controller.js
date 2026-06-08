@@ -3,12 +3,12 @@ import {
   createProduct,
   getAllProductsAdmin,
 } from '../../services/productService.js'
-import { ok, fail } from '../utils/response.js'
+import { ok, okPaginated, fail } from '../utils/response.js'
 
 export async function getProducts(req, res, next) {
   try {
-    const data = await getAllProductsAdmin(req.auth.userId)
-    return ok(res, data, 'Get products success')
+    const { products, total, page, limit } = await getAllProductsAdmin(req.auth.userId, req.query)
+    return okPaginated(res, products, total, page, limit, 'Get products success')
   } catch (error) {
     return next(error)
   }

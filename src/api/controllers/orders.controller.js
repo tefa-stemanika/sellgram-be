@@ -1,31 +1,11 @@
 import prisma from '../../services/db.js'
-import { ok, fail } from '../utils/response.js'
+import { ok, okPaginated, fail } from '../utils/response.js'
+import { getAllOrdersForUser } from '../../services/orderService.js'
 
 export async function getOrders(req, res, next) {
   try {
-    const userId = req.auth.userId
-    const limit = Math.min(Number(req.query.limit) || 50, 200)
-    const status = req.query.status
-
-    const where = {
-      userId,
-      ...(status ? { status: String(status) } : {}),
-    }
-
-    const orders = await prisma.order.findMany({
-      where,
-      include: {
-        orderItems: {
-          include: {
-            product: true,
-          },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-    })
-
-    return ok(res, orders, 'Get orders success')
+    const { orders, total, page, limit } = await getAllOrdersForUser(req.auth.userId, req.query)
+    return okPaginated(res, orders, total, page, limit, 'Get orders success')
   } catch (error) {
     return next(error)
   }

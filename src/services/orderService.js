@@ -100,15 +100,49 @@ export async function getOrderByOrderId(userId, orderId) {
 }
 
 /**
- * Ambil semua order user (untuk admin dashboard).
+ * Ambil semua order user dengan pagination, search, filter.
+ * Query params: search, status, source, sortBy, sortDir, page, limit
  */
-export async function getAllOrdersForUser(userId, limit = 50) {
-  return prisma.order.findMany({
-    where: { userId },
-    include: { orderItems: { include: { product: true } } },
-    orderBy: { createdAt: 'desc' },
-    take: limit,
-  })
+export async function getAllOrdersForUser(userId, filters = {}) {
+  const {
+    search,
+    status,
+    source,
+    sortBy = 'createdAt',
+    sortDir = 'desc',
+    page = 1,
+    limit = 20,
+  } = filters
+
+  const ALLOWED_SORT = ['createdAt', 'totalPrice', 'paidAt', 'status']
+  const safeSortBy = ALLOWED_SORT.includes(sortBy) ? sortBy : 'createdAt'
+  const safeSortDir = sortDir === 'asc' ? 'asc' : 'desc'
+
+  const where = {
+    userId,
+    ...(status && { status }),
+    ...(source && { source }),
+    ...(search && {
+      OR: [
+        { orderId: { contains: search, mode: 'insensitive' } },
+        { customerName: { contains: search, mode: 'insensitive' } },
+        { customerPhone: { contains: search } },
+      ],
+    }),
+  }
+
+  const [orders, total] = await Promise.all([
+    prisma.order.findMany({
+      where,
+      include: { orderItems: { include: { product: true } } },
+      orderBy: { [safeSortBy]: safeSortDir },
+      skip: (Number(page) - 1) * Number(limit),
+      take: Number(limit),
+    }),
+    prisma.order.count({ where }),
+  ])
+
+  return { orders, total, page: Number(page), limit: Number(limit), totalPages: Math.ceil(total / Number(limit)) }
 }
 
 /**

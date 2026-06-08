@@ -102,7 +102,7 @@ export async function handleCallbackQuery(bot, query, userId) {
 }
 
 export async function showMenuButtons(bot, chatId, editMsgId = null, userId) {
-  const products = await getAllProducts(userId)
+  const { products } = await getAllProducts(userId)
 
   if (products.length === 0) {
     const text = '⚠️ Belum ada produk tersedia saat ini.'

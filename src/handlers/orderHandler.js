@@ -18,7 +18,7 @@ async function send(bot, chatId, text) {
 
 export async function handleMenu(bot, msg, userId) {
   const chatId = msg.chat.id
-  const products = await getAllProducts(userId)
+  const { products } = await getAllProducts(userId)
 
   if (products.length === 0) {
     await send(bot, chatId, '⚠️ Belum ada produk tersedia saat ini.')
@@ -51,7 +51,7 @@ export async function handlePesan(bot, msg, userId) {
 
   await setOrder(userId, telegramId, { state: ORDER_STATE.SELECTING_PRODUCT })
 
-  const products = await getAllProducts(userId)
+  const { products } = await getAllProducts(userId)
   let text = '📋 *Pilih produk yang ingin dipesan:*\n\n'
   products.forEach((p, idx) => {
     text += `*${idx + 1}.* ${p.emoji} ${p.name} — ${formatRupiah(p.price)}\n`
@@ -199,7 +199,7 @@ export async function handleOrderInput(bot, msg, userId) {
   const num = parseInt(input, 10)
 
   if (order.state === ORDER_STATE.SELECTING_PRODUCT) {
-    const products = await getAllProducts(userId)
+    const { products } = await getAllProducts(userId)
     if (isNaN(num) || num < 1 || num > products.length) {
       await send(
         bot,

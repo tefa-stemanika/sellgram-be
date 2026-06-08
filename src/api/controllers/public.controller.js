@@ -11,7 +11,7 @@ import {
   isPaymentFailed,
 } from '../../services/midtrans.js'
 import { notifQueue } from '../../services/queue.js'
-import { ok, fail } from '../utils/response.js'
+import { ok, okPaginated, fail } from '../utils/response.js'
 
 export async function getUserProfile(req, res, next) {
   try {
@@ -41,8 +41,8 @@ export async function listProducts(req, res, next) {
     if (!userId) {
       return fail(res, 'Invalid userId', 400)
     }
-    const products = await getAllProducts(userId)
-    return ok(res, products, 'Get products success')
+    const { products, total, page, limit } = await getAllProducts(userId, req.query)
+    return okPaginated(res, products, total, page, limit, 'Get products success')
   } catch (error) {
     return next(error)
   }
@@ -126,6 +126,50 @@ export async function createOrder(req, res, next) {
       'Order created successfully',
       201,
     )
+  } catch (error) {
+    return next(error)
+  }
+}
+
+export async function getOrderDetail(req, res, next) {
+  try {
+    const orderId = String(req.params.orderId || '').trim()
+    if (!orderId) {
+      return fail(res, 'Missing orderId', 400)
+    }
+
+    const order = await prisma.order.findFirst({
+      where: { orderId },
+      include: {
+        orderItems: {
+          include: {
+            product: { select: { id: true, name: true, emoji: true, price: true } },
+          },
+        },
+      },
+    })
+
+    if (!order) {
+      return fail(res, 'Order not found', 404)
+    }
+
+    return ok(res, {
+      orderId: order.orderId,
+      status: order.status,
+      totalPrice: order.totalPrice,
+      customerName: order.customerName,
+      customerPhone: order.customerPhone,
+      paidAt: order.paidAt,
+      createdAt: order.createdAt,
+      items: order.orderItems.map((item) => ({
+        id: item.product.id,
+        name: item.product.name,
+        emoji: item.product.emoji,
+        price: item.unitPrice,
+        quantity: item.quantity,
+        subtotal: item.unitPrice * item.quantity,
+      })),
+    }, 'Get order detail success')
   } catch (error) {
     return next(error)
   }

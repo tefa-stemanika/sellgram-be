@@ -5,15 +5,44 @@
 import prisma from './db.js'
 
 /**
- * Ambil semua produk user yang tersedia (isAvailable = true).
- * @param {string} userId
- * @returns {Promise<Product[]>}
+ * Ambil semua produk user yang tersedia (isAvailable = true) dengan pagination.
+ * Query params: search, sortBy, sortDir, page, limit
  */
-export async function getAllProducts(userId) {
-  return prisma.product.findMany({
-    where: { userId, isAvailable: true },
-    orderBy: { createdAt: 'asc' },
-  })
+export async function getAllProducts(userId, filters = {}) {
+  const {
+    search,
+    sortBy = 'createdAt',
+    sortDir = 'asc',
+    page = 1,
+    limit = 20,
+  } = filters
+
+  const ALLOWED_SORT = ['createdAt', 'name', 'price']
+  const safeSortBy = ALLOWED_SORT.includes(sortBy) ? sortBy : 'createdAt'
+  const safeSortDir = sortDir === 'asc' ? 'asc' : 'desc'
+
+  const where = {
+    userId,
+    isAvailable: true,
+    ...(search && {
+      OR: [
+        { name: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } },
+      ],
+    }),
+  }
+
+  const [products, total] = await Promise.all([
+    prisma.product.findMany({
+      where,
+      orderBy: { [safeSortBy]: safeSortDir },
+      skip: (Number(page) - 1) * Number(limit),
+      take: Number(limit),
+    }),
+    prisma.product.count({ where }),
+  ])
+
+  return { products, total, page: Number(page), limit: Number(limit), totalPages: Math.ceil(total / Number(limit)) }
 }
 
 /**
@@ -29,16 +58,46 @@ export async function getProductById(userId, id) {
 }
 
 /**
- * Ambil semua produk user (termasuk tidak available).
+ * Ambil semua produk user (termasuk tidak available) dengan pagination.
  * Untuk admin dashboard.
- * @param {string} userId
- * @returns {Promise<Product[]>}
+ * Query params: search, isAvailable, sortBy, sortDir, page, limit
  */
-export async function getAllProductsAdmin(userId) {
-  return prisma.product.findMany({
-    where: { userId },
-    orderBy: { createdAt: 'asc' },
-  })
+export async function getAllProductsAdmin(userId, filters = {}) {
+  const {
+    search,
+    isAvailable,
+    sortBy = 'createdAt',
+    sortDir = 'asc',
+    page = 1,
+    limit = 20,
+  } = filters
+
+  const ALLOWED_SORT = ['createdAt', 'name', 'price']
+  const safeSortBy = ALLOWED_SORT.includes(sortBy) ? sortBy : 'createdAt'
+  const safeSortDir = sortDir === 'asc' ? 'asc' : 'desc'
+
+  const where = {
+    userId,
+    ...(isAvailable !== undefined && { isAvailable: isAvailable === 'true' }),
+    ...(search && {
+      OR: [
+        { name: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } },
+      ],
+    }),
+  }
+
+  const [products, total] = await Promise.all([
+    prisma.product.findMany({
+      where,
+      orderBy: { [safeSortBy]: safeSortDir },
+      skip: (Number(page) - 1) * Number(limit),
+      take: Number(limit),
+    }),
+    prisma.product.count({ where }),
+  ])
+
+  return { products, total, page: Number(page), limit: Number(limit), totalPages: Math.ceil(total / Number(limit)) }
 }
 
 /**

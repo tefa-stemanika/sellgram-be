@@ -30,6 +30,20 @@ export function ok(res, data, message = 'OK', statusCode = 200) {
   })
 }
 
+export function okPaginated(res, items, total, page, limit, message = 'OK') {
+  return res.status(200).json({
+    success: true,
+    message,
+    data: normalizeJsonValue(items),
+    metadata: {
+      total,
+      page: Number(page),
+      limit: Number(limit),
+      totalPages: Math.ceil(total / Number(limit)) || 0,
+    },
+  })
+}
+
 export function fail(res, message, statusCode = 400) {
   return res.status(statusCode).json({
     success: false,

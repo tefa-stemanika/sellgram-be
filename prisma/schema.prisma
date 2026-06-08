@@ -31,6 +31,7 @@ model User {
   labels       Label[]
   comments     TicketComment[]
   activities   TicketActivity[]
+  customers    Customer[]
 
   @@map("users")
 }
@@ -130,6 +131,9 @@ model Order {
   createdAt       DateTime    @default(now()) @map("created_at")
   updatedAt       DateTime    @updatedAt @map("updated_at")
 
+  customerId  String?     @map("customer_id") @db.Uuid
+  customer    Customer?   @relation(fields: [customerId], references: [id])
+
   user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   orderItems OrderItem[]
   ticket     Ticket?
@@ -160,6 +164,52 @@ enum OrderStatus {
   CANCELLED
   PAYMENT_PENDING
   PAYMENT_FAILED
+}
+
+// ── Customer Database ──────────────────────────────────────────────────────────
+
+enum CustomerSource {
+  ORDER
+  MANUAL
+  IMPORT
+}
+
+model Customer {
+  id           String         @id @default(uuid()) @db.Uuid
+  userId       String         @map("user_id") @db.Uuid
+
+  telegramId   BigInt?        @map("telegram_id")
+  email        String?        @db.VarChar(255)
+  phone        String?        @db.VarChar(20)
+
+  name         String?        @db.VarChar(100)
+  username     String?        @db.VarChar(100)
+  notes        String?        @db.Text
+
+  hasTelegram  Boolean        @default(false) @map("has_telegram")
+  hasWhatsapp  Boolean        @default(false) @map("has_whatsapp")
+  hasEmail     Boolean        @default(false) @map("has_email")
+
+  firstOrderAt DateTime?      @map("first_order_at")
+  lastOrderAt  DateTime?      @map("last_order_at")
+  totalOrders  Int            @default(0) @map("total_orders")
+  totalSpent   Int            @default(0) @map("total_spent")
+
+  source       CustomerSource @default(ORDER)
+
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders Order[]
+
+  @@unique([userId, telegramId])
+  @@unique([userId, email])
+  @@unique([userId, phone])
+  @@index([userId, lastOrderAt])
+  @@index([userId, totalSpent])
+  @@index([userId, source])
+  @@map("customers")
 }
 
 // ── Ticketing ─────────────────────────────────────────────────────────────────

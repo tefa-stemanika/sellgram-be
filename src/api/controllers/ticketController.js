@@ -1,11 +1,27 @@
 import prisma from '../../services/db.js'
-import { ok, fail } from '../utils/response.js'
+import { ok, okPaginated, fail } from '../utils/response.js'
 import * as ticketService from '../../services/ticketService.js'
 
 export async function listTickets(req, res, next) {
   try {
-    const result = await ticketService.getTickets(req.auth.userId, req.query)
-    return ok(res, result)
+    const { tickets, total, page, limit } = await ticketService.getTickets(req.auth.userId, req.query)
+    return okPaginated(res, tickets, total, page, limit)
+  } catch (error) {
+    return next(error)
+  }
+}
+
+export async function listTicketsByStatus(req, res, next) {
+  try {
+    const { status } = req.params
+    const filters = {
+      ...req.query,
+      status,
+      page: req.query.page ? Number(req.query.page) : 1,
+      limit: req.query.limit ? Number(req.query.limit) : 20,
+    }
+    const { tickets, total, page, limit } = await ticketService.getTickets(req.auth.userId, filters)
+    return okPaginated(res, tickets, total, page, limit)
   } catch (error) {
     return next(error)
   }
