@@ -181,6 +181,32 @@ Tidak perlu diproses.`
   }
 }
 
+/**
+ * Send arbitrary message to admin via admin bot (multi-tenant).
+ * userId: pemilik bot (tenant), text: message content (Markdown).
+ * Digunakan oleh stockService.js untuk low stock alert dll.
+ */
+export async function sendAdminBotMessage(userId, text) {
+  const adminBotInstance = getAdminBotForUser(userId)
+  if (!adminBotInstance) {
+    console.warn(`[AdminBot] No admin bot for user ${userId} — skip message`)
+    return
+  }
+  const adminChatId = await getAdminChatIdForUser(userId)
+  if (!adminChatId) {
+    console.warn(`[AdminBot] No admin chat id for user ${userId} — skip message`)
+    return
+  }
+
+  try {
+    await adminBotInstance.sendMessage(adminChatId, text, {
+      parse_mode: 'Markdown',
+    })
+  } catch (err) {
+    console.error(`[AdminBot] Gagal kirim message (user ${userId}):`, err.message)
+  }
+}
+
 function formatPaymentMethod(paymentType) {
   const map = {
     qris: 'QRIS',

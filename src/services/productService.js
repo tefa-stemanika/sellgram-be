@@ -108,7 +108,7 @@ export async function getAllProductsAdmin(userId, filters = {}) {
  */
 export async function createProduct(
   userId,
-  { name, description, price, emoji = '🛍️' },
+  { name, description, price, emoji = '🛍️', stock, stockEnabled, allowOversell, lowStockAlert },
 ) {
   return prisma.product.create({
     data: {
@@ -118,6 +118,10 @@ export async function createProduct(
       price,
       emoji,
       isAvailable: true,
+      ...(stock !== undefined && { stock }),
+      ...(stockEnabled !== undefined && { stockEnabled }),
+      ...(allowOversell !== undefined && { allowOversell }),
+      ...(lowStockAlert !== undefined && { lowStockAlert }),
     },
   })
 }

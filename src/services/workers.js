@@ -3,6 +3,7 @@ import { getBotForUser, configureTelegramWebhookForUser, scheduleTelegramWebhook
 import { notifyAdminOrderSuccessForUser, notifyAdminOrderFailedForUser } from './adminBot.js'
 import { createTicketFromOrder } from './ticketService.js'
 import { upsertCustomerFromOrder } from './customerService.js'
+import { deductStock, refundStock } from './stockService.js'
 import prisma from './db.js'
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379'
@@ -53,6 +54,10 @@ export function startWorkers() {
         console.error('[Worker] Gagal upsert customer:', err.message)
       })
 
+      await deductStock(order.id, data.userId).catch(err => {
+        console.error('[Worker] Gagal deduct stock:', err.message)
+      })
+
       await notifyAdminOrderSuccessForUser(data.userId, order, data.notification)
     } else if (job.name === 'payment-failed') {
       if (bot && order.source !== 'WEBSITE') {
@@ -65,6 +70,10 @@ export function startWorkers() {
           console.error('[Worker] Gagal kirim notif gagal user:', err.message)
         }
       }
+
+      await refundStock(order.id, data.userId).catch(err => {
+        console.error('[Worker] Gagal refund stock:', err.message)
+      })
 
       await notifyAdminOrderFailedForUser(data.userId, order)
     }

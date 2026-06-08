@@ -1,6 +1,7 @@
 import { getAllProducts, formatRupiah } from '../services/productService.js'
 import { saveOrder, updateOrderPayment } from '../services/orderService.js'
 import { createSnapTransaction } from '../services/midtrans.js'
+import { validateStock } from '../services/stockService.js'
 import {
   getOrder,
   setOrder,
@@ -76,6 +77,11 @@ export async function handleKonfirmasi(bot, msg, userId) {
   await send(bot, chatId, '⏳ Memproses order dan membuat link pembayaran...')
 
   try {
+    await validateStock(
+      [{ productId: selectedProduct.id, quantity }],
+      userId,
+    )
+
     const savedOrder = await saveOrder({
       userId,
       telegramId,

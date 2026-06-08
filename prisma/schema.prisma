@@ -32,6 +32,7 @@ model User {
   comments     TicketComment[]
   activities   TicketActivity[]
   customers    Customer[]
+  stockLogs    StockLog[]
 
   @@map("users")
 }
@@ -96,11 +97,18 @@ model Product {
   price       Int
   emoji       String   @db.VarChar(10) @default("🛍️")
   isAvailable Boolean  @default(true) @map("is_available")
+
+  stock        Int      @default(0)
+  stockEnabled Boolean  @default(false) @map("stock_enabled")
+  allowOversell Boolean @default(false) @map("allow_oversell")
+  lowStockAlert Int     @default(5) @map("low_stock_alert")
+
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
   user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   orderItems OrderItem[]
+  stockLogs  StockLog[]
 
   @@map("products")
 }
@@ -200,6 +208,8 @@ model Customer {
   createdAt    DateTime       @default(now()) @map("created_at")
   updatedAt    DateTime       @updatedAt @map("updated_at")
 
+  auth   CustomerAuth?
+
   user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   orders Order[]
 
@@ -210,6 +220,52 @@ model Customer {
   @@index([userId, totalSpent])
   @@index([userId, source])
   @@map("customers")
+}
+
+// ── Customer Auth (Portal Login) ──────────────────────────────────────────────────
+
+model CustomerAuth {
+  id              String    @id @default(uuid()) @db.Uuid
+  customerId      String    @unique @map("customer_id") @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  email           String    @db.VarChar(255)
+  passwordHash    String    @map("password_hash") @db.Text
+  isVerified      Boolean   @default(false) @map("is_verified")
+  lastLoginAt     DateTime? @map("last_login_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, email])
+  @@map("customer_auth")
+}
+
+// ── Stock Management ──────────────────────────────────────────────────────────────
+
+enum StockLogType {
+  SALE
+  REFUND
+  RESTOCK
+  ADJUSTMENT
+}
+
+model StockLog {
+  id         String        @id @default(uuid()) @db.Uuid
+  productId  String        @map("product_id") @db.Uuid
+  userId     String        @map("user_id") @db.Uuid
+  orderId    String?       @map("order_id") @db.Uuid
+  type       StockLogType
+  delta      Int
+  stockAfter Int           @map("stock_after")
+  note       String?       @db.VarChar(255)
+  createdAt  DateTime      @default(now()) @map("created_at")
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([productId, createdAt])
+  @@map("stock_logs")
 }
 
 // ── Ticketing ─────────────────────────────────────────────────────────────────
