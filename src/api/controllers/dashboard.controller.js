@@ -32,6 +32,8 @@ export async function getDashboard(req, res, next) {
       websiteOrders,
       telegramRevenue,
       websiteRevenue,
+      totalTickets,
+      openTickets,
     ] = await Promise.all([
       prisma.product.count({ where: { userId, isAvailable: true } }),
       prisma.order.count({ where: { userId } }),
@@ -67,25 +69,23 @@ export async function getDashboard(req, res, next) {
         where: { userId, source: 'WEBSITE', status: 'COMPLETED' },
         _sum: { totalPrice: true },
       }),
+      prisma.ticket.count({ where: { userId } }),
+      prisma.ticket.count({
+        where: { userId, status: { in: ['OPEN', 'IN_PROGRESS', 'WAITING_CUSTOMER'] } },
+      }),
     ])
 
-    let percentage = 0
-    let trend = 'stable'
-    if (prevRevenue > 0) {
-      percentage = parseFloat(
-        (((currentRevenue - prevRevenue) / prevRevenue) * 100).toFixed(1),
-      )
-      trend = percentage > 1 ? 'up' : percentage < -1 ? 'down' : 'stable'
-    } else if (currentRevenue > 0) {
-      trend = 'up'
-    }
+    const revenueGrowth = prevRevenue > 0
+      ? ((currentRevenue - prevRevenue) / prevRevenue) * 100
+      : currentRevenue > 0 ? 100 : 0
 
     return ok(res, {
       activeProducts,
       totalOrders,
       pendingOrders,
       totalRevenue: currentRevenue,
-      revenueChange: { percentage, trend },
+      revenueGrowth: Math.round(revenueGrowth * 100) / 100,
+      recentOrders,
       ordersBySource: {
         TELEGRAM: telegramOrders,
         WEBSITE: websiteOrders,
@@ -94,7 +94,11 @@ export async function getDashboard(req, res, next) {
         TELEGRAM: telegramRevenue._sum.totalPrice ?? 0,
         WEBSITE: websiteRevenue._sum.totalPrice ?? 0,
       },
-      recentOrders,
+      tickets: {
+        total: totalTickets,
+        open: openTickets,
+        closed: totalTickets - openTickets,
+      },
     })
   } catch (error) {
     return next(error)
