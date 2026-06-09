@@ -157,9 +157,7 @@ export async function handleMessage(bot, msg, userId) {
   }
 
   // ── Mode AI: proses natural language dengan OpenRouter ────────────────────
-  const handledByOrder = await handleOrderInput(bot, msg, userId)
-  if (handledByOrder) return
-
+  // AI handle semua input natural — skip handleOrderInput biar AI yang proses
   await bot.sendChatAction(chatId, 'typing')
 
   try {
@@ -207,7 +205,22 @@ async function executeFunctionCall(bot, msg, userId, name, args) {
           args.quantity,
         )
       }
-      return handlePesan(bot, msg, userId)
+      const { getAllProducts, formatRupiah } = await import(
+        '../services/productService.js'
+      )
+      const { products } = await getAllProducts(userId)
+      const list = products
+        .map(
+          (p) =>
+            `${p.emoji} ${p.name} — ${formatRupiah(p.price)}\n   ${p.description}`,
+        )
+        .join('\n\n')
+      await bot.sendMessage(
+        chatId,
+        `Dengan senang hati! Mau pesan yang mana, kak? 😊\n\n${list}`,
+        { parse_mode: 'Markdown' },
+      )
+      return
     case 'confirm_order':
       return handleKonfirmasi(bot, msg, userId)
     case 'cancel_order':
@@ -226,7 +239,7 @@ async function handlePesanDenganProduk(bot, msg, userId, productId, quantity) {
   const { setOrder, getOrder, ORDER_STATE } = await import(
     '../services/order.js'
   )
-  const { getProductById, formatRupiah } = await import(
+  const { getProductById, getAllProducts, formatRupiah } = await import(
     '../services/productService.js'
   )
 
@@ -239,8 +252,28 @@ async function handlePesanDenganProduk(bot, msg, userId, productId, quantity) {
     return
   }
 
-  const product = await getProductById(userId, productId)
-  if (!product) return handlePesan(bot, msg, userId)
+  let product
+  if (typeof productId === 'number' || !Number.isNaN(Number(productId))) {
+    const { products } = await getAllProducts(userId)
+    product = products[Number(productId) - 1]
+  } else {
+    product = await getProductById(userId, productId)
+  }
+  if (!product) {
+    const allProducts = await getAllProducts(userId)
+    const list = allProducts.products
+      .map(
+        (p) =>
+          `${p.emoji} ${p.name} — ${formatRupiah(p.price)}\n   ${p.description}`,
+      )
+      .join('\n\n')
+    await bot.sendMessage(
+      chatId,
+      `Maaf kak, produk yang dimaksud nggak ketemu. Yang tersedia:\n\n${list}\n\nMau pesan yang mana?`,
+      { parse_mode: 'Markdown' },
+    )
+    return
+  }
 
   if (
     quantity &&

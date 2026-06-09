@@ -130,11 +130,10 @@ Kamu akan otomatis mendapat notifikasi setelah pembayaran berhasil.`
     await send(bot, chatId, invoice)
   } catch (error) {
     console.error('[handleKonfirmasi error]', error.message)
-    await send(
-      bot,
-      chatId,
-      '⚠️ Gagal membuat transaksi. Silakan coba lagi atau hubungi admin.',
-    )
+    const msg = error.message.startsWith('Stok')
+      ? `⚠️ ${error.message}`
+      : '⚠️ Gagal membuat transaksi. Silakan coba lagi atau hubungi admin.'
+    await send(bot, chatId, msg)
   }
 }
 

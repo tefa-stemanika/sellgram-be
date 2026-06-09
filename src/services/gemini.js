@@ -6,24 +6,24 @@ const functionDeclarations = [
   {
     name: 'show_menu',
     description:
-      'Tampilkan daftar menu/produk yang tersedia. Panggil ketika user ingin melihat menu, daftar produk, atau menanyakan apa yang dijual.',
+      'Tampilkan daftar menu formal. Hanya panggil jika user menggunakan perintah /menu atau meminta tampilan menu resmi. Untuk obrolan biasa tentang produk, jawab langsung tanpa function call.',
   },
   {
     name: 'start_order',
     description:
-      'Mulai proses pemesanan. Panggil ketika user ingin memesan atau membeli produk. Ekstrak product_id dan quantity dari pesan user jika disebutkan.',
+      'Mulai proses pemesanan. Panggil HANYA jika user menyebut nama produk spesifik. Ekstrak product_id (nomor urut di daftar menu: 1=pertama, 2=kedua, dst.) dan quantity (jumlah) dari pesan user. Contoh: "pesan baso baka 2" → product_id=3 quantity=2. JANGAN panggil jika user belum menyebut produk — tanya dulu secara natural.',
     parameters: {
       type: 'OBJECT',
       properties: {
         product_id: {
           type: 'INTEGER',
           description:
-            'ID produk dari daftar menu. Isi jika user menyebut nama produk spesifik, kosongkan jika belum.',
+            'Nomor urut produk di daftar menu (1 = produk pertama, 2 = produk kedua, dst.). WAJIB diisi jika user menyebut nama produk — cocokkan nama produk dari user ke daftar produk. Contoh: user bilang "baso baka" → product_id 3 (Baso Bakar).',
         },
         quantity: {
           type: 'INTEGER',
           description:
-            'Jumlah produk yang dipesan. Isi jika user menyebut angka/jumlah dalam pesanannya, kosongkan jika belum disebutkan.',
+            'Jumlah produk yang dipesan. Isi jika user menyebut angka/jumlah dalam pesanannya, kosongkan jika belum disebutkan. Contoh: "pesan bakso 4" → quantity=4.',
         },
       },
     },
@@ -54,7 +54,8 @@ export async function askGemini(userMessage, userId, conversationHistory = []) {
 
   const { products } = await getAllProducts(userId)
   const productContext = products
-    .map((p) => `- ID ${p.id}: ${p.name} (${formatRupiah(p.price)})`)
+    .map((p) => `${p.emoji} ${p.name} — ${formatRupiah(p.price)}
+   ${p.description}`)
     .join('\n')
 
   const contents = [
@@ -69,26 +70,43 @@ export async function askGemini(userMessage, userId, conversationHistory = []) {
     system_instruction: {
       parts: [
         {
-          text: `Kamu adalah asisten toko online yang ramah dan membantu.
-Jawab dalam bahasa yang sama dengan user (Indonesia atau Inggris).
+          text: `Kamu adalah customer service toko online yang ramah, hangat, dan natural. Nama toko tidak disebut secara kaku — kamu cukup bicara seperti CS toko beneran.
 
-Produk yang tersedia:
+KEPRIBADIAN:
+- Bicaralah dengan hangat seperti CS toko sungguhan, bukan robot.
+- Untuk sapaan seperti "Hai", "Halo", "Pagi", balas dengan santai dan tawarkan bantuan: "Hai juga! Ada yang bisa aku bantu?"
+- Jika user minta rekomendasi (misal: "Aku lagi pengen yang manis, ada rekomendasi?"), gunakan deskripsi produk untuk menyarankan dengan bahasa alami.
+- Jika user tanya soal produk spesifik (misal: "Nasi gorengnya apa aja isinya?"), jawab pakai deskripsi produk dengan santai.
+- Variasikan cara kamu merespon, jangan monoton.
+- Jangan gunakan format seperti "ID 1: Nama Produk" — bicaralah seperti manusia.
+- Jika user ngobrol di luar topik (sapa, tanya kabar, dll.), respon dengan hangat dan tanyakan apakah ada yang bisa dibantu.
+
+PRODUK:
 ${productContext}
 
-Gunakan function calling untuk aksi berikut:
-- User mau lihat menu/produk → panggil show_menu
-- User mau pesan/beli sesuatu → panggil start_order, sertakan product_id dan quantity jika disebutkan dalam pesan
-- User mau batalkan pesanan → panggil cancel_order
-- User mau konfirmasi/lanjut → panggil confirm_order
-- User tanya status pesanannya → panggil get_order_status
+FUNCTION CALLING:
+Gunakan function calling hanya untuk transaksi. Jangan pernah menyebut "function calling" atau "tool" ke user.
 
-Untuk obrolan biasa, jawab langsung tanpa function call.`,
+- User menyebut nama produk tertentu + ingin memesan → start_order (product_id = nomor urut, quantity = jumlah).
+  Contoh: "pesan baso baka 2" → product_id=3 (Baso Bakar) quantity=2. "mau nasi" → product_id=1.
+- Jika user bilang "mau pesan" tapi BELUM sebut produk → JANGAN panggil start_order. Tanya balik natural, sebut pilihan yang ada.
+- User mau batalkan pesanan → cancel_order
+- User mau konfirmasi/lanjut pembayaran → confirm_order
+- User tanya status pesanannya → get_order_status
+- show_menu hanya untuk /menu atau jika user minta tampilan menu formal — JANGAN panggil untuk obrolan biasa
+
+PENTING:
+- Jika user tanya "ada apa aja?", "menu apa aja?", "jualan apa?" — jawab langsung dari daftar PRODUK di atas dengan bahasa natural, jangan panggil show_menu
+- Jika user ngomong biasa (sapa, tanya produk, rekomendasi, ngobrol), jawab langsung tanpa function call
+- Jangan pernah mengulang URL atau format teknis ke user. Biarkan function call yang handle proses transaksi.
+- JANGAN PERNAH menampilkan nomor urut menu seperti "1. Nasi" atau "pilih nomor 1-4". Bicaralah natural.
+- Jika user menyebut produk dengan ejaan tidak baku (misal "baso baka" untuk "Baso Bakar"), cocokkan ke produk terdekat.`,
         },
       ],
     },
     contents,
     tools: [{ functionDeclarations }],
-    generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
+    generationConfig: { temperature: 0.9, maxOutputTokens: 2048 },
   }
 
   const response = await fetch(`${GEMINI_API_URL}/${model}:generateContent`, {
