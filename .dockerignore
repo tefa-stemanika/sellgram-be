@@ -1,0 +1,13 @@
+.env
+.env.*
+node_modules
+.git
+.gitignore
+.DS_Store
+tests/
+docs/
+*.md
+AGENTS.md
+opencode.json
+Telegram Order Bot API.postman_collection.json
+scripts/

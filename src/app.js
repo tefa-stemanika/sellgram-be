@@ -7,6 +7,7 @@ import ticketRouter from './api/routes/ticketRoutes.js'
 import labelRouter from './api/routes/labelRoutes.js'
 import customerRouter from './api/routes/customerRoutes.js'
 import customerPortalRoutes from './api/routes/customerPortalRoutes.js'
+import dummySupplierRouter from './api/routes/dummySupplier.routes.js'
 import { requestLogger } from './api/middlewares/requestLogger.middleware.js'
 import { notFoundHandler } from './api/middlewares/notFound.middleware.js'
 import { errorHandler } from './api/middlewares/error.middleware.js'
@@ -44,6 +45,7 @@ export function createApp() {
   app.use('/api/labels', labelRouter)
   app.use('/api/customers', customerRouter)
   app.use('/api/portal/:userId', customerPortalRoutes)
+  app.use('/api/dummy', dummySupplierRouter)
   app.use('/api', apiRouter)
 
   app.use(notFoundHandler)

@@ -2,7 +2,7 @@ import 'dotenv/config'
 import { createApp } from './app.js'
 import { getRedisClient, redisQuit } from './services/redis.js'
 import { initializeTenantMap } from './services/tenantResolver.js'
-import { startWorkers } from './services/workers.js'
+import { startWorkers, stopWorkers } from './services/workers.js'
 
 console.log('🚀 Telegram AI Bot — Multi-Tenant Mode (M6)\n')
 
@@ -50,7 +50,6 @@ setInterval(() => {
 async function shutdown(signal) {
   console.log(`\n⏹️  ${signal} diterima — shutdown...`)
   server.close()
-  const { stopWorkers } = await import('./services/workers.js')
   await stopWorkers()
   await stopAllBots()
   await redisQuit()

@@ -5,7 +5,7 @@
 import prisma from './db.js'
 
 /**
- * Ambil semua produk user yang tersedia (isAvailable = true) dengan pagination.
+ * Ambil semua produk user yang tersedia (deletedAt = null) dengan pagination.
  * Query params: search, sortBy, sortDir, page, limit
  */
 export async function getAllProducts(userId, filters = {}) {
@@ -23,7 +23,7 @@ export async function getAllProducts(userId, filters = {}) {
 
   const where = {
     userId,
-    isAvailable: true,
+    deletedAt: null,
     ...(search && {
       OR: [
         { name: { contains: search, mode: 'insensitive' } },
@@ -53,7 +53,7 @@ export async function getAllProducts(userId, filters = {}) {
  */
 export async function getProductById(userId, id) {
   return prisma.product.findFirst({
-    where: { userId, id, isAvailable: true },
+    where: { userId, id, deletedAt: null },
   })
 }
 
@@ -78,6 +78,7 @@ export async function getAllProductsAdmin(userId, filters = {}) {
 
   const where = {
     userId,
+    deletedAt: null,
     ...(isAvailable !== undefined && { isAvailable: isAvailable === 'true' }),
     ...(search && {
       OR: [
@@ -149,7 +150,7 @@ export async function updateProduct(userId, id, data) {
 export async function deleteProduct(userId, id) {
   return prisma.product.update({
     where: { id },
-    data: { isAvailable: false },
+    data: { deletedAt: new Date() },
   })
 }
 

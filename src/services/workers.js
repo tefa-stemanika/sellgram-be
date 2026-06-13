@@ -4,6 +4,9 @@ import { notifyAdminOrderSuccessForUser, notifyAdminOrderFailedForUser } from '.
 import { createTicketFromOrder } from './ticketService.js'
 import { upsertCustomerFromOrder } from './customerService.js'
 import { deductStock, refundStock } from './stockService.js'
+import { createTicketFulfillmentLog } from './fulfillmentService.js'
+import { enqueueFulfillment } from './fulfillment/fulfillmentEngine.js'
+import { createFulfillmentWorker } from '../workers/fulfillmentWorker.js'
 import prisma from './db.js'
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379'
@@ -11,6 +14,7 @@ const connection = { url: REDIS_URL }
 
 let notifWorker = null
 let webhookWorker = null
+let fulfillmentWorker = null
 
 export function startWorkers() {
   if (notifWorker || webhookWorker) {
@@ -46,8 +50,9 @@ export function startWorkers() {
         }
       }
 
-      await createTicketFromOrder(order, data.userId).catch(err => {
+      const ticket = await createTicketFromOrder(order, data.userId).catch(err => {
         console.error('[Worker] Gagal buat ticket:', err.message)
+        return null
       })
 
       await upsertCustomerFromOrder(order, data.userId).catch(err => {
@@ -58,7 +63,21 @@ export function startWorkers() {
         console.error('[Worker] Gagal deduct stock:', err.message)
       })
 
+      await enqueueFulfillment(order.id, data.userId).catch(err => {
+        console.error('[Worker] Gagal enqueue fulfillment:', err.message)
+      })
+
       await notifyAdminOrderSuccessForUser(data.userId, order, data.notification)
+
+      if (ticket) {
+        await createTicketFulfillmentLog({
+          userId: data.userId,
+          ticketId: ticket.id,
+          operation: 'PAYMENT_COMPLETED',
+          description: `Pembayaran berhasil untuk order ${order.orderId}`,
+          metadata: { orderId: order.orderId, totalPrice: order.totalPrice, source: order.source },
+        }).catch(err => console.error('[Worker] Gagal log fulfillment:', err.message))
+      }
     } else if (job.name === 'payment-failed') {
       if (bot && order.source !== 'WEBSITE') {
         const telegramId = Number(order.telegramId)
@@ -76,6 +95,17 @@ export function startWorkers() {
       })
 
       await notifyAdminOrderFailedForUser(data.userId, order)
+
+      const failedTicket = await prisma.ticket.findFirst({ where: { orderId: order.id } })
+      if (failedTicket) {
+        await createTicketFulfillmentLog({
+          userId: data.userId,
+          ticketId: failedTicket.id,
+          operation: 'PAYMENT_FAILED',
+          description: `Pembayaran gagal/expired untuk order ${order.orderId}`,
+          metadata: { orderId: order.orderId },
+        }).catch(err => console.error('[Worker] Gagal log fulfillment:', err.message))
+      }
     }
   }, { connection, concurrency: 5 })
 
@@ -101,6 +131,8 @@ export function startWorkers() {
     }
   })
 
+  fulfillmentWorker = createFulfillmentWorker(connection)
+
   notifWorker.on('completed', (job) => {
     console.log(`[Worker] Notif ${job.id} completed: ${job.name}`)
   })
@@ -124,6 +156,10 @@ export async function stopWorkers() {
   if (webhookWorker) {
     await webhookWorker.close()
     webhookWorker = null
+  }
+  if (fulfillmentWorker) {
+    await fulfillmentWorker.close()
+    fulfillmentWorker = null
   }
   console.log('[Workers] Stopped')
 }

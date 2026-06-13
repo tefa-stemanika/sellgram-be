@@ -35,7 +35,7 @@ export async function getDashboard(req, res, next) {
       totalTickets,
       openTickets,
     ] = await Promise.all([
-      prisma.product.count({ where: { userId, isAvailable: true } }),
+      prisma.product.count({ where: { userId, deletedAt: null, isAvailable: true } }),
       prisma.order.count({ where: { userId } }),
       prisma.order.count({
         where: { userId, status: { in: ['PENDING', 'PAYMENT_PENDING'] } },

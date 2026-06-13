@@ -13,7 +13,7 @@ export async function getUserById(userId) {
     include: {
       botConfigs: true,
       credentials: true,
-      products: { where: { isAvailable: true } },
+      products: { where: { deletedAt: null, isAvailable: true } },
       orders: { orderBy: { createdAt: 'desc' }, take: 10 },
     },
   })

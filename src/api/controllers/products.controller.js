@@ -72,7 +72,7 @@ export async function updateProductEndpoint(req, res, next) {
     }
 
     const existing = await prisma.product.findFirst({
-      where: { id, userId: req.auth.userId },
+      where: { id, userId: req.auth.userId, deletedAt: null },
     })
 
     if (!existing) {
@@ -130,12 +130,12 @@ export async function deleteProductEndpoint(req, res, next) {
       return fail(res, 'Product tidak ditemukan', 404)
     }
 
-    const deleted = await prisma.product.update({
+    await prisma.product.update({
       where: { id },
-      data: { isAvailable: false },
+      data: { deletedAt: new Date() },
     })
 
-    return ok(res, deleted, 'Delete product success')
+    return ok(res, { id }, 'Delete product success')
   } catch (error) {
     return next(error)
   }

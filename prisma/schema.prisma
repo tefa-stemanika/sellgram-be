@@ -32,7 +32,13 @@ model User {
   comments     TicketComment[]
   activities   TicketActivity[]
   customers    Customer[]
-  stockLogs    StockLog[]
+  stockLogs              StockLog[]
+  ticketFulfillmentLogs  TicketFulfillmentLog[]
+  fulfillmentConfigs     FulfillmentConfig[]
+  stockItems             StockItem[]
+  slotAccounts           SlotAccount[]
+  slots                  Slot[]
+  fulfillmentLogs        FulfillmentLog[]
 
   @@map("users")
 }
@@ -103,12 +109,19 @@ model Product {
   allowOversell Boolean @default(false) @map("allow_oversell")
   lowStockAlert Int     @default(5) @map("low_stock_alert")
 
+  deletedAt   DateTime? @map("deleted_at")
+
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
   user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   orderItems OrderItem[]
   stockLogs  StockLog[]
+
+  fulfillmentConfig FulfillmentConfig?
+  stockItems        StockItem[]
+  slotAccounts      SlotAccount[]
+  slots             Slot[]
 
   @@map("products")
 }
@@ -145,6 +158,10 @@ model Order {
   user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   orderItems OrderItem[]
   ticket     Ticket?
+
+  fulfillmentLog FulfillmentLog?
+  stockItems     StockItem[]
+  slots          Slot[]
 
   @@unique([userId, orderId])
   @@unique([userId, midtransOrderId])
@@ -371,4 +388,200 @@ model TicketActivity {
   user   User?   @relation(fields: [userId], references: [id])
 
   @@map("ticket_activities")
+}
+
+// ── Ticket Fulfillment Log ─────────────────────────────────────────────────────
+
+enum TicketFulfillmentOperation {
+  TICKET_CREATED
+  TICKET_ASSIGNED
+  LABEL_APPLIED
+  LABEL_REMOVED
+  COMMENT_ADDED
+  STATUS_CHANGED
+  PRIORITY_CHANGED
+  CUSTOMER_LINK
+  ACTIVITY_NOTE
+  PAYMENT_COMPLETED
+}
+
+model TicketFulfillmentLog {
+  id           String                     @id @default(uuid()) @db.Uuid
+  userId       String                     @map("user_id") @db.Uuid
+  ticketId     String                     @map("ticket_id") @db.Uuid
+  operation    TicketFulfillmentOperation
+  description  String                     @db.Text
+  metadata     Json?                      @db.JsonB
+  performedById String?                   @map("performed_by_id") @db.Uuid
+  createdAt    DateTime                   @default(now()) @map("created_at")
+
+  user        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+  @@index([userId, operation])
+  @@map("ticket_fulfillment_logs")
+}
+
+// ── Fulfillment Engine ─────────────────────────────────────────────────────────
+
+enum FulfillmentType {
+  STOCK_POOL
+  SLOT_ASSIGN
+  API_EXTERNAL
+  MANUAL
+}
+
+enum FulfillmentStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  SKIPPED
+}
+
+enum StockItemStatus {
+  AVAILABLE
+  USED
+  RESERVED
+  EXPIRED
+}
+
+enum SlotStatus {
+  ACTIVE
+  AVAILABLE
+  EXPIRED
+}
+
+model FulfillmentConfig {
+  id        String          @id @default(uuid()) @db.Uuid
+  userId    String          @map("user_id") @db.Uuid
+  productId String          @unique @map("product_id") @db.Uuid
+
+  type FulfillmentType
+
+  // MANUAL
+  manualNote String? @map("manual_note") @db.Text
+
+  // API_EXTERNAL
+  apiUrl            String?  @map("api_url") @db.Text
+  apiMethod         String?  @default("POST") @map("api_method") @db.VarChar(10)
+  apiHeaders        Json?    @map("api_headers") @db.JsonB
+  apiPayloadTemplate String? @map("api_payload_template") @db.Text
+  apiCredentials    String?  @map("api_credentials") @db.Text
+  apiSuccessPath    String?  @map("api_success_path") @db.VarChar(255)
+  apiSuccessValue   String?  @map("api_success_value") @db.VarChar(255)
+  apiResultPath     String?  @map("api_result_path") @db.VarChar(255)
+
+  deliveryMessage String? @map("delivery_message") @db.Text
+
+  isActive  Boolean   @default(true) @map("is_active")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("fulfillment_config")
+}
+
+model StockItem {
+  id        String          @id @default(uuid()) @db.Uuid
+  userId    String          @map("user_id") @db.Uuid
+  productId String          @map("product_id") @db.Uuid
+
+  content  String          @db.Text
+  status   StockItemStatus @default(AVAILABLE)
+  usedAt   DateTime?       @map("used_at")
+  orderId  String?         @map("order_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order   Order?  @relation(fields: [orderId], references: [id])
+
+  @@index([productId, status])
+  @@index([userId])
+  @@map("stock_items")
+}
+
+model SlotAccount {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  productId String   @map("product_id") @db.Uuid
+
+  label       String  @db.VarChar(255)
+  credentials String  @db.Text
+  totalSlots  Int     @map("total_slots")
+  usedSlots   Int     @default(0) @map("used_slots")
+  isActive    Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  product Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  slots   Slot[]
+
+  @@index([productId, isActive])
+  @@index([userId])
+  @@map("slot_accounts")
+}
+
+model Slot {
+  id            String      @id @default(uuid()) @db.Uuid
+  userId        String      @map("user_id") @db.Uuid
+  slotAccountId String      @map("slot_account_id") @db.Uuid
+  productId     String      @map("product_id") @db.Uuid
+
+  slotIdentifier String    @map("slot_identifier") @db.VarChar(255)
+  additionalInfo String?   @map("additional_info") @db.Text
+  status         SlotStatus @default(AVAILABLE)
+  expiresAt      DateTime?  @map("expires_at")
+  assignedAt     DateTime?  @map("assigned_at")
+  orderId        String?    @map("order_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  slotAccount SlotAccount @relation(fields: [slotAccountId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order       Order?      @relation(fields: [orderId], references: [id])
+  product     Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([slotAccountId, status])
+  @@index([productId, status])
+  @@index([userId])
+  @@map("slots")
+}
+
+model FulfillmentLog {
+  id          String            @id @default(uuid()) @db.Uuid
+  userId      String            @map("user_id") @db.Uuid
+  orderId     String            @unique @map("order_id") @db.Uuid
+  productId   String            @map("product_id") @db.Uuid
+
+  type        FulfillmentType
+  status      FulfillmentStatus @default(PENDING)
+
+  attempts    Int    @default(0)
+  maxAttempts Int    @default(3) @map("max_attempts")
+
+  deliveredContent String?   @map("delivered_content") @db.Text
+  deliveredAt      DateTime? @map("delivered_at")
+  lastError        String?   @map("last_error") @db.Text
+  lastAttemptAt    DateTime? @map("last_attempt_at")
+  metadata         Json?     @db.JsonB
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([userId, createdAt])
+  @@map("fulfillment_logs")
 }

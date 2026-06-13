@@ -19,3 +19,8 @@ export const webhookQueue = new Queue('telegram-webhooks', {
   connection,
   defaultJobOptions,
 })
+
+export const fulfillmentQueue = new Queue('fulfillment-jobs', {
+  connection,
+  defaultJobOptions,
+})

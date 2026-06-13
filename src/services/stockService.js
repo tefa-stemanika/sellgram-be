@@ -4,7 +4,7 @@ export async function validateStock(items, userId) {
   const productIds = items.map((i) => i.productId)
 
   const products = await prisma.product.findMany({
-    where: { id: { in: productIds }, userId },
+    where: { id: { in: productIds }, userId, deletedAt: null },
     select: {
       id: true,
       name: true,
@@ -127,7 +127,7 @@ export async function refundStock(orderId, userId) {
 
 export async function restockProduct(productId, userId, quantity, note = null) {
   const product = await prisma.product.findFirst({
-    where: { id: productId, userId },
+    where: { id: productId, userId, deletedAt: null },
   })
   if (!product) throw new Error('Product not found')
   if (quantity <= 0) throw new Error('Quantity harus lebih dari 0')
@@ -155,7 +155,7 @@ export async function restockProduct(productId, userId, quantity, note = null) {
 
 export async function adjustStock(productId, userId, newStock, note = null) {
   const product = await prisma.product.findFirst({
-    where: { id: productId, userId },
+    where: { id: productId, userId, deletedAt: null },
   })
   if (!product) throw new Error('Product not found')
   if (newStock < 0) throw new Error('Stok tidak boleh negatif')
