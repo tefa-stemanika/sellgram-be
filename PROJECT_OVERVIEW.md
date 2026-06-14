@@ -1,6 +1,6 @@
 # Telegram AI Bot — Project Overview
 
-Multi-tenant Telegram bot untuk jualan online dengan integrasi pembayaran Midtrans, dukungan AI, web catalog, stock management, customer portal, dan ticketing system.
+Multi-tenant Telegram bot untuk jualan online dengan integrasi pembayaran Midtrans, dukungan AI, web catalog, stock management, customer portal, ticketing system, dan **fulfillment engine otomatis**.
 
 ---
 
@@ -17,7 +17,7 @@ Multi-tenant Telegram bot untuk jualan online dengan integrasi pembayaran Midtra
 | Auth (Admin) | JWT (`jsonwebtoken`) | 7 hari expiry, untuk dashboard API |
 | Auth (Customer) | JWT (`jsonwebtoken`) | 30 hari expiry, `type: 'customer'` di payload |
 | Password | bcrypt | 10 salt rounds |
-| Background Jobs | BullMQ | Redis-based queue: notifikasi + webhook |
+| Background Jobs | BullMQ | Redis-based queue: notifikasi + webhook + **fulfillment** |
 | AI Provider | Gemini API + OpenRouter SDK | Function calling untuk order via chat |
 | Payment | Midtrans Snap API | QRIS, GoPay, ShopeePay, Bank Transfer |
 | Encryption | AES-256-GCM (Node `crypto`) | Semua credentials terenkripsi di DB |
@@ -55,7 +55,18 @@ src/
 │   ├── routes/                       # Route definitions
 │   └── utils/                        # response.js (ok/fail helpers)
 ├── handlers/                         # Telegram bot message/callback handlers
-├── services/                         # Business logic
+├── services/
+│   ├── fulfillment/                  # Fulfillment engine
+│   │   ├── fulfillmentEngine.js      # enqueueFulfillment() — entry point
+│   │   ├── fulfillmentNotifier.js    # Kirim hasil ke customer & notif admin
+│   │   └── strategies/               # 4 strategi fulfillment
+│   │       ├── stockPoolStrategy.js
+│   │       ├── slotAssignStrategy.js
+│   │       ├── apiExternalStrategy.js
+│   │       └── manualStrategy.js
+│   └── ...                           # Business logic lain
+├── workers/
+│   └── fulfillmentWorker.js          # BullMQ worker untuk fulfillment-jobs
 └── utils/                            # encryption, jwt, password helpers
 ```
 
@@ -93,7 +104,7 @@ src/
 
 ### 4. Dashboard API (JWT Auth)
 
-- Ringkasan: active products, total orders, pending orders
+- Ringkasan: active products (filter `deletedAt: null`), total orders, pending orders
 - Revenue bulan ini + perbandingan bulan lalu
 - Tren revenue: `up` / `down` / `stable`
 - Orders by source: `TELEGRAM` vs `WEBSITE`
@@ -103,8 +114,9 @@ src/
 ### 5. Product Management
 
 - CRUD produk per tenant
-- Soft delete (set `isAvailable = false`)
-- Field: name, description, price (integer IDR), emoji, availability
+- Soft delete via `deletedAt` timestamp (set `deletedAt = now()`)
+- Field: name, description, price (integer IDR), emoji, `isAvailable`, `deletedAt`
+- Query default filter `deletedAt: null` di semua endpoint
 
 ### 6. Stock Management
 
@@ -205,7 +217,71 @@ Fitur:
 - Activity log otomatis untuk setiap perubahan
 - Label dengan warna untuk kategorisasi
 
-### 13. Webhook System
+---
+
+### 13. Fulfillment Engine (NEW)
+
+Otomatisasi pengiriman produk digital setelah pembayaran `COMPLETED` — tanpa intervensi manual admin. Mendukung **empat strategi pengiriman**, retry otomatis via BullMQ, dan audit trail lengkap per order.
+
+**Trigger Point:**
+Fulfillment dipanggil **satu tempat** di akhir Midtrans webhook payment success handler:
+```
+updateOrder(COMPLETED) → deductStock → upsertCustomerFromOrder → createTicketFromOrder
+→ enqueueFulfillment(order.id, userId)
+```
+
+**Queue BullMQ:** `fulfillment-jobs` — retry 3x, exponential backoff 5s
+
+**Empat Strategi:**
+
+| Type | Use Case | Cara Kerja |
+|---|---|---|
+| `STOCK_POOL` | Voucher, akun, serial key — stok disiapkan di muka | Ambil satu item dari pool, tandai `USED`, kirim ke customer |
+| `SLOT_ASSIGN` | Netflix/Spotify sharing — akun induk dengan beberapa slot | Assign slot kosong ke customer, kirim credentials + slot identifier |
+| `API_EXTERNAL` | Pulsa, paket data, top-up game — integrasi API supplier | HTTP POST ke API supplier dengan payload template, kirim hasil ke customer |
+| `MANUAL` | Jasa custom, produk fisik, API belum tersedia | Update order ke `PROCESSING`, notifikasi admin bot untuk proses manual |
+
+**Placeholder yang didukung di `deliveryMessage` dan `apiPayloadTemplate`:**
+
+| Placeholder | Diganti dengan |
+|-------------|----------------|
+| `{{order_id}}` | Order ID (format: INV/xxx) |
+| `{{product_name}}` | Nama produk |
+| `{{result}}` | Hasil dari strategy (kode voucher, credentials akun, dll.) |
+| `{{customer_name}}` | Nama customer |
+| `{{customer_phone}}` | Nomor telepon customer (fallback: order.customerPhone → order.customer?.phone) |
+| `{{product_price}}` | Harga produk (hanya untuk API_EXTERNAL) |
+
+**Idempotency:** Di awal setiap strategy, jika `log.status === 'SUCCESS'` atau `'SKIPPED'`, langsung return — mencegah double fulfillment.
+
+**Concurrency Safety:**
+- `STOCK_POOL` & `SLOT_ASSIGN` menggunakan `FOR UPDATE SKIP LOCKED` via `prisma.$queryRaw` — mencegah race condition saat order concurrent.
+- `SLOT_ASSIGN`: `usedSlots` increment dilakukan dalam transaction atomik dengan slot update.
+
+**Fulfillment Log:** Satu record per order (`FulfillmentLog`) — audit trail lengkap: status, attempts, deliveredContent, lastError, metadata.
+
+**Admin Dashboard Endpoints:**
+
+| Method | Path | Keterangan |
+|---|---|---|
+| GET | `/api/products/:productId/fulfillment` | Lihat config fulfillment |
+| POST | `/api/products/:productId/fulfillment` | Buat/update config |
+| DELETE | `/api/products/:productId/fulfillment` | Hapus config |
+| GET | `/api/products/:productId/stock-items` | Daftar stok (filter by status) |
+| POST | `/api/products/:productId/stock-items` | Upload single/bulk (newline-separated) |
+| DELETE | `/api/products/:productId/stock-items/:itemId` | Hapus item AVAILABLE |
+| GET | `/api/products/:productId/stock-items/count` | Hitung stok tersedia |
+| GET/POST | `/api/products/:productId/slot-accounts` | List/tambah akun induk |
+| PUT/DELETE | `/api/products/:productId/slot-accounts/:accountId` | Update/hapus akun induk |
+| GET/POST | `/api/products/:productId/slot-accounts/:accountId/slots` | List/tambah slot |
+| PATCH | `/api/products/:productId/slots/:slotId/release` | Release slot (langganan habis) |
+| GET | `/api/fulfillment-logs` | Daftar log (filter by status, date) |
+| GET | `/api/fulfillment-logs/:orderId` | Detail log satu order |
+| POST | `/api/fulfillment-logs/:orderId/retry` | Trigger retry manual untuk FAILED |
+
+---
+
+### 14. Webhook System
 
 **Midtrans Webhook:**
 - Endpoint: `POST /api/webhook/midtrans`
@@ -281,6 +357,18 @@ Midtrans POST /api/webhook/midtrans → verify signature
 → deductStock (jika success) / refundStock (jika failed)
 → upsertCustomerFromOrder
 → createTicketFromOrder
+→ enqueueFulfillment (jika COMPLETED)
+```
+
+### Fulfillment Worker
+```
+BullMQ worker (queue: fulfillment-jobs) pickup job
+→ find order + fulfillmentConfig (dari product pertama yang punya config aktif)
+→ execute strategy (STOCK_POOL / SLOT_ASSIGN / API_EXTERNAL / MANUAL)
+→ replace placeholders di deliveryMessage
+→ save FulfillmentLog (SUCCESS/FAILED)
+→ kirim delivery ke customer via Telegram
+→ retry 3x exponential backoff jika gagal
 ```
 
 ---
@@ -330,6 +418,24 @@ Midtrans POST /api/webhook/midtrans → verify signature
 | GET/POST/PUT/DELETE | `/api/customers` | CRUD customer |
 | GET | `/api/bots/status` | Status bot instances |
 
+### Fulfillment Engine (JWT)
+| Method | Path | Keterangan |
+|---|---|---|
+| GET | `/api/products/:productId/fulfillment` | Lihat config fulfillment |
+| POST | `/api/products/:productId/fulfillment` | Buat/update config |
+| DELETE | `/api/products/:productId/fulfillment` | Hapus config |
+| GET | `/api/products/:productId/stock-items` | Daftar stok (filter by status) |
+| POST | `/api/products/:productId/stock-items` | Upload single/bulk (newline-separated) |
+| DELETE | `/api/products/:productId/stock-items/:itemId` | Hapus item AVAILABLE |
+| GET | `/api/products/:productId/stock-items/count` | Hitung stok tersedia |
+| GET/POST | `/api/products/:productId/slot-accounts` | List/tambah akun induk |
+| PUT/DELETE | `/api/products/:productId/slot-accounts/:accountId` | Update/hapus akun induk |
+| GET/POST | `/api/products/:productId/slot-accounts/:accountId/slots` | List/tambah slot |
+| PATCH | `/api/products/:productId/slots/:slotId/release` | Release slot (langganan habis) |
+| GET | `/api/fulfillment-logs` | Daftar log (filter by status, date) |
+| GET | `/api/fulfillment-logs/:orderId` | Detail log satu order |
+| POST | `/api/fulfillment-logs/:orderId/retry` | Trigger retry manual untuk FAILED |
+
 ---
 
 ## Database Schema
@@ -347,8 +453,56 @@ Midtrans POST /api/webhook/midtrans → verify signature
 | `TicketStatus` | OPEN, IN_PROGRESS, WAITING_CUSTOMER, RESOLVED, CLOSED, CANCELLED |
 | `TicketPriority` | LOW, MEDIUM, HIGH, URGENT |
 | `TicketSource` | ORDER, MANUAL |
+| `TicketFulfillmentOperation` | TICKET_CREATED, TICKET_ASSIGNED, LABEL_APPLIED, LABEL_REMOVED, COMMENT_ADDED, STATUS_CHANGED, PRIORITY_CHANGED, CUSTOMER_LINK, ACTIVITY_NOTE, PAYMENT_COMPLETED |
+| `FulfillmentType` | STOCK_POOL, SLOT_ASSIGN, API_EXTERNAL, MANUAL |
+| `FulfillmentStatus` | PENDING, PROCESSING, SUCCESS, FAILED, SKIPPED |
+| `StockItemStatus` | AVAILABLE, USED, RESERVED, EXPIRED |
+| `SlotStatus` | ACTIVE, AVAILABLE, EXPIRED |
 
 ### Model Relationships
+
+```
+User 1─N BotConfig               (cascade delete)
+User 1─N BotCredential           (cascade delete)
+User 1─N Product                 (cascade delete)
+User 1─N Order                   (cascade delete)
+User 1─N Customer                (cascade delete)
+User 1─N StockLog                (cascade delete)
+User 1─N Ticket                  (cascade delete)
+User 1─N Label                   (cascade delete)
+User 1─N TicketComment
+User 1─N TicketActivity
+User 1─N FulfillmentConfig       (cascade delete)
+User 1─N StockItem               (cascade delete)
+User 1─N SlotAccount             (cascade delete)
+User 1─N Slot                    (cascade delete)
+User 1─N FulfillmentLog          (cascade delete)
+
+Product 1─N OrderItem
+Product 1─N StockLog
+Product 1─1 FulfillmentConfig    (cascade delete)
+Product 1─N StockItem            (cascade delete)
+Product 1─N SlotAccount          (cascade delete)
+Product 1─N Slot                 (cascade delete)
+
+Order 1─N OrderItem
+Order 1─1 Ticket                 (opsional)
+Order 1─1 FulfillmentLog         (cascade delete)
+Order 1─N StockItem              (cascade delete)
+Order 1─N Slot                   (cascade delete)
+
+Customer 1─N Order
+Customer 1─1 CustomerAuth        (opsional)
+
+Ticket M─N Label                 (via TicketLabel)
+Ticket 1─N TicketComment
+Ticket 1─N TicketActivity
+Ticket 1─N TicketFulfillmentLog
+
+Label M─N Ticket                 (via TicketLabel)
+
+SlotAccount 1─N Slot
+```
 
 ```
 User 1─N BotConfig       (cascade delete)
@@ -442,6 +596,38 @@ Label M─N Ticket         (via TicketLabel)
 
 ---
 
+### Fulfillment Engine Models (NEW)
+
+**FulfillmentConfig** — Konfigurasi fulfillment per produk (1-to-1).
+- `type` (FulfillmentType), `isActive`
+- `manualNote` (untuk MANUAL)
+- `apiUrl`, `apiMethod`, `apiHeaders`, `apiPayloadTemplate`, `apiCredentials` (encrypted), `apiSuccessPath`, `apiSuccessValue`, `apiResultPath` (untuk API_EXTERNAL)
+- `deliveryMessage` — template pesan ke customer dengan placeholder
+- Unique: `(productId)`
+
+**StockItem** — Item individual untuk `STOCK_POOL`.
+- `content` — plain text/JSON (contoh: "user:pass", "VOUCHER-XXXXX")
+- `status` (StockItemStatus), `usedAt`, `orderId`
+- Index: `(productId, status)`, `(userId)`
+
+**SlotAccount** — Akun induk untuk `SLOT_ASSIGN`.
+- `label`, `credentials` (encrypted JSON), `totalSlots`, `usedSlots`, `isActive`
+- Index: `(productId, isActive)`, `(userId)`
+
+**Slot** — Slot individual dalam `SlotAccount`.
+- `slotIdentifier` (contoh: "Profile 3", "Slot B"), `additionalInfo`
+- `status` (SlotStatus), `expiresAt`, `assignedAt`, `orderId`
+- Index: `(slotAccountId, status)`, `(productId, status)`, `(userId)`
+
+**FulfillmentLog** — Audit trail per order.
+- `type` (FulfillmentType), `status` (FulfillmentStatus)
+- `attempts`, `maxAttempts` (default 3)
+- `deliveredContent`, `deliveredAt`, `lastError`, `lastAttemptAt`, `metadata`
+- Unique: `(orderId)`
+- Index: `(userId, status)`, `(userId, createdAt)`
+
+---
+
 ## Redis Key Patterns
 
 | Key | TTL | Fungsi |
@@ -454,6 +640,8 @@ Label M─N Ticket         (via TicketLabel)
 | `webhook_lock:{userId}:{telegramId}` | 30s | Lock for serial processing |
 | `welcome_sent:{userId}:{chatId}` | 86400s | /start deduplication |
 | `ratelimit:{ip}` | 60s | Rate limit counter |
+| `tenant_config:{userId}` | 600s | Tenant config cache (include decrypted credentials) |
+| `fulfillment-jobs` | BullMQ | Queue untuk fulfillment worker (retry 3x, backoff 5s) |
 
 ---
 
@@ -467,6 +655,9 @@ Plain ESM scripts (tanpa framework testing), real DB integration:
 | `npm run test:webhook` | `tests/webhook-tests.js` | Payment notification flow |
 | `npm run test:load` | `tests/load-tests.js` | Concurrent order/payment load |
 | `npm run test:phase5` | — | All three sequentially |
+| `npm run test:fulfillment` | `tests/fulfillment-tests.js` | Fulfillment engine (4 strategies, idempotency, slot release) |
+
+**Manual Test Scenarios:** `tests/fulfillment-manual-scenarios.md` — dokumentasi skenario testing manual untuk 4 strategi fulfillment.
 
 ---
 
@@ -495,6 +686,7 @@ docker compose up -d --build
 | `npm run db:seed` | Seed default products |
 | `npm run db:seed-config` | Migrate .env → encrypted DB |
 | `npm run db:studio` | Prisma Studio di port 5555 |
+| `npm run test:fulfillment` | Test fulfillment engine (4 strategies) |
 
 ---
 
@@ -510,5 +702,6 @@ docker compose up -d --build
 | `PUBLIC_BASE_URL` | For webhooks | Public HTTPS URL (ngrok) |
 | `GEMINI_API_KEY` | Optional | Google Gemini API key |
 | `OPENROUTER_API_KEY` | Optional | OpenRouter API key |
+| `DUMMY_SUPPLIER_SECRET` | Optional | Secret untuk endpoint dummy supplier (testing API_EXTERNAL) |
 
 Credentials sensitif (bot tokens, Midtrans keys) disimpan terenkripsi di database, bukan di env setelah `db:seed-config`.
