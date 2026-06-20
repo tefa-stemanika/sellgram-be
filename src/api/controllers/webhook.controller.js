@@ -9,6 +9,7 @@ import {
   processTelegramWebhookUpdateForUser,
   verifyTelegramWebhookSecretForUser,
 } from '../../services/botManager.js'
+import { activateSubscription } from '../../services/subscriptionService.js'
 
 export async function handleMidtransWebhook(req, res, next) {
   try {
@@ -21,6 +22,16 @@ export async function handleMidtransWebhook(req, res, next) {
     )
 
     const orderId = notification.order_id
+
+    // Cek apakah ini payment untuk subscription (prefix SUB-) atau order biasa
+    if (orderId.startsWith('SUB-')) {
+      const paymentType = notification.payment_type || notification.va_numbers?.[0]?.bank || 'unknown'
+      if (isPaymentSuccess(notification)) {
+        await activateSubscription(orderId, paymentType)
+      }
+      // Tidak perlu handle failed — invoice otomatis expired setelah 24 jam via cron
+      return res.status(200).json({ status: 'ok' })
+    }
 
     const order = await prisma.order.findFirst({
       where: { orderId },

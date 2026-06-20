@@ -12,6 +12,7 @@ import {
 } from '../../services/midtrans.js'
 import { notifQueue } from '../../services/queue.js'
 import { ok, okPaginated, fail } from '../utils/response.js'
+import { assertMonthlyOrderLimit } from '../../services/planLimitService.js'
 
 export async function getUserProfile(req, res, next) {
   try {
@@ -90,6 +91,12 @@ export async function createOrder(req, res, next) {
     const product = await getProductById(userId, productId)
     if (!product) {
       return fail(res, 'Product not found', 404)
+    }
+
+    try {
+      await assertMonthlyOrderLimit(userId, prisma)
+    } catch (err) {
+      return fail(res, err.message, 403)
     }
 
     const savedOrder = await saveOrder({

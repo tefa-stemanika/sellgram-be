@@ -10,13 +10,14 @@ import {
   getStockLogsEndpoint,
 } from '../controllers/products.controller.js'
 import { requireAuth } from '../middlewares/auth.middleware.js'
+import { resource as planResource } from '../middlewares/planGuard.js'
 
 const productsRouter = Router()
 
 productsRouter.use(requireAuth)
 productsRouter.get('/products', getProducts)
 productsRouter.get('/products/:id', getProductById)
-productsRouter.post('/products', createProductEndpoint)
+productsRouter.post('/products', planResource('product'), createProductEndpoint)
 productsRouter.put('/products/:id', updateProductEndpoint)
 productsRouter.delete('/products/:id', deleteProductEndpoint)
 productsRouter.post('/products/:id/restock', restockProductEndpoint)
