@@ -11,6 +11,8 @@ import {
   resetOrder,
   ORDER_STATE,
 } from '../services/order.js'
+import { assertMonthlyOrderLimit } from '../services/planLimitService.js'
+import prisma from '../services/db.js'
 
 async function editMessage(bot, chatId, messageId, text, keyboard = null) {
   const opts = { parse_mode: 'Markdown' }
@@ -298,6 +300,8 @@ async function handleConfirmOrder(
   )
 
   try {
+    await assertMonthlyOrderLimit(userId, prisma)
+
     const savedOrder = await saveOrder({
       userId,
       telegramId: fromUser.id,
@@ -346,16 +350,13 @@ Tersedia: QRIS, GoPay, ShopeePay, Transfer Bank
     await editMessage(bot, chatId, msgId, invoice, keyboard)
   } catch (error) {
     console.error('[handleConfirmOrder button error]', error.message)
-    await editMessage(
-      bot,
-      chatId,
-      msgId,
-      '⚠️ Gagal membuat transaksi. Silakan coba lagi.',
-      [
-        [{ text: '🔄 Coba Lagi', callback_data: 'confirm_order' }],
-        [{ text: '❌ Batal', callback_data: 'cancel_order' }],
-      ],
-    )
+    const msg = error.code === 'MONTHLY_ORDER_LIMIT_EXCEEDED'
+      ? '⚠️ Maaf, order tidak dapat diproses saat ini. Silakan hubungi admin.'
+      : '⚠️ Gagal membuat transaksi. Silakan coba lagi.'
+    const keyboard = error.code === 'MONTHLY_ORDER_LIMIT_EXCEEDED'
+      ? [[{ text: '↩️ Kembali ke Menu', callback_data: 'back_to_menu' }]]
+      : [[{ text: '🔄 Coba Lagi', callback_data: 'confirm_order' }], [{ text: '❌ Batal', callback_data: 'cancel_order' }]]
+    await editMessage(bot, chatId, msgId, msg, keyboard)
   }
 }
 

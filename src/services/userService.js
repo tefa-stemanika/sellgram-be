@@ -86,12 +86,11 @@ export async function countActiveBots(userId) {
 export function canCreateNewBot(user) {
   const limits = {
     FREE: 1,
-    STARTER: 3,
-    PRO: 10,
+    STARTER: 1,
+    PRO: 1,
   }
 
   const limit = limits[user.plan] || 1
-  // Note: actual check dilakukan di botManager.js
   return limit
 }
 

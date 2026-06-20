@@ -39,6 +39,8 @@ model User {
   slotAccounts           SlotAccount[]
   slots                  Slot[]
   fulfillmentLogs        FulfillmentLog[]
+  subscription   Subscription?
+  invoices       Invoice[]
 
   @@map("users")
 }
@@ -584,4 +586,82 @@ model FulfillmentLog {
   @@index([userId, status])
   @@index([userId, createdAt])
   @@map("fulfillment_logs")
+}
+
+// ── Subscription & Billing ─────────────────────────────────────────────────────────
+
+enum SubscriptionStatus {
+  ACTIVE       // Aktif, dalam masa berlaku
+  EXPIRED      // Sudah lewat currentPeriodEnd, masih dalam grace period
+  CANCELLED    // Dibatalkan sebelum expired
+  PAST_DUE     // Grace period habis — akses diblokir
+}
+
+enum InvoiceStatus {
+  PENDING      // Menunggu pembayaran
+  PAID         // Sudah dibayar
+  EXPIRED      // Tidak dibayar sampai batas waktu (24 jam)
+  CANCELLED    // Dibatalkan manual
+}
+
+enum PlanInterval {
+  MONTHLY
+  YEARLY       // Opsional, bisa diaktifkan nanti
+}
+
+model Subscription {
+  id                  String             @id @default(uuid()) @db.Uuid
+  userId              String             @unique @map("user_id") @db.Uuid  // 1-to-1 dengan User — satu subscription aktif
+  plan                UserPlan           // STARTER atau PRO (FREE tidak punya record ini)
+  status              SubscriptionStatus @default(ACTIVE)
+  interval            PlanInterval       @default(MONTHLY)
+
+  currentPeriodStart  DateTime           @map("current_period_start") // Kapan periode ini dimulai
+  currentPeriodEnd    DateTime           @map("current_period_end")   // Kapan periode ini berakhir (tanggal jatuh tempo)
+  gracePeriodEnd      DateTime           @map("grace_period_end")     // currentPeriodEnd + 3 hari
+
+  cancelledAt         DateTime?          @map("cancelled_at")         // Diisi jika status = CANCELLED
+  cancelReason        String?            @map("cancel_reason")
+
+  createdAt           DateTime           @default(now()) @map("created_at")
+  updatedAt           DateTime           @updatedAt @map("updated_at")
+
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoices            Invoice[]
+
+  @@index([status, currentPeriodEnd])  // Untuk cron job query
+}
+
+model Invoice {
+  id               String        @id @default(uuid()) @db.Uuid
+  userId           String        @map("user_id") @db.Uuid
+  subscriptionId   String?       @map("subscription_id") @db.Uuid  // Null jika invoice pertama (belum ada subscription)
+
+  invoiceNumber    String        @unique @map("invoice_number")  // Format: INV-YYYYMMDD-NNNN
+  plan             UserPlan      // Plan yang dibeli
+  interval         PlanInterval  @default(MONTHLY)
+  amount           Int           // Nominal dalam IDR (integer, sama seperti Product.price)
+  status           InvoiceStatus @default(PENDING)
+
+  // Midtrans integration
+  midtransOrderId  String?       @unique @map("midtrans_order_id")  // ID yang dikirim ke Midtrans
+  paymentUrl       String?       @map("payment_url")       // Snap payment URL
+  paidAt           DateTime?     @map("paid_at")
+  paymentMethod    String?       @map("payment_method")    // "qris", "bank_transfer", dll.
+
+  // Periode yang dibayar
+  periodStart      DateTime      @map("period_start")      // Awal periode yang di-cover invoice ini
+  periodEnd        DateTime      @map("period_end")        // Akhir periode yang di-cover
+
+  expiredAt        DateTime      @map("expired_at")        // Invoice expired jika tidak dibayar (default: 24 jam)
+
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  user             User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subscription     Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@index([userId, status])
+  @@index([userId, createdAt])
+  @@index([midtransOrderId])
 }

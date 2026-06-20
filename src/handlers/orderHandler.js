@@ -2,6 +2,8 @@ import { getAllProducts, formatRupiah } from '../services/productService.js'
 import { saveOrder, updateOrderPayment } from '../services/orderService.js'
 import { createSnapTransaction } from '../services/midtrans.js'
 import { validateStock } from '../services/stockService.js'
+import { assertMonthlyOrderLimit } from '../services/planLimitService.js'
+import prisma from '../services/db.js'
 import {
   getOrder,
   setOrder,
@@ -77,6 +79,8 @@ export async function handleKonfirmasi(bot, msg, userId) {
   await send(bot, chatId, '⏳ Memproses order dan membuat link pembayaran...')
 
   try {
+    await assertMonthlyOrderLimit(userId, prisma)
+
     await validateStock(
       [{ productId: selectedProduct.id, quantity }],
       userId,
@@ -130,9 +134,11 @@ Kamu akan otomatis mendapat notifikasi setelah pembayaran berhasil.`
     await send(bot, chatId, invoice)
   } catch (error) {
     console.error('[handleKonfirmasi error]', error.message)
-    const msg = error.message.startsWith('Stok')
-      ? `⚠️ ${error.message}`
-      : '⚠️ Gagal membuat transaksi. Silakan coba lagi atau hubungi admin.'
+    const msg = error.code === 'MONTHLY_ORDER_LIMIT_EXCEEDED'
+      ? '⚠️ Maaf, order tidak dapat diproses saat ini. Silakan hubungi admin.'
+      : error.message.startsWith('Stok')
+        ? `⚠️ ${error.message}`
+        : '⚠️ Gagal membuat transaksi. Silakan coba lagi atau hubungi admin.'
     await send(bot, chatId, msg)
   }
 }

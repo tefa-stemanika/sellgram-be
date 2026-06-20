@@ -7,6 +7,7 @@ import { deductStock, refundStock } from './stockService.js'
 import { createTicketFulfillmentLog } from './fulfillmentService.js'
 import { enqueueFulfillment } from './fulfillment/fulfillmentEngine.js'
 import { createFulfillmentWorker } from '../workers/fulfillmentWorker.js'
+import { incrementMonthlyOrderCount } from './planLimitService.js'
 import prisma from './db.js'
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379'
@@ -61,6 +62,10 @@ export function startWorkers() {
 
       await deductStock(order.id, data.userId).catch(err => {
         console.error('[Worker] Gagal deduct stock:', err.message)
+      })
+
+      await incrementMonthlyOrderCount(data.userId).catch(err => {
+        console.error('[Worker] Gagal increment order counter:', err.message)
       })
 
       await enqueueFulfillment(order.id, data.userId).catch(err => {
