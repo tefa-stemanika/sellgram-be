@@ -13,6 +13,7 @@ import stockItemRouter from './stockItem.routes.js'
 import slotAccountRouter from './slotAccount.routes.js'
 import slotRouter from './slot.routes.js'
 import fulfillmentLogRouter from './fulfillmentLog.routes.js'
+import broadcastRouter from './broadcast.routes.js'
 
 const apiRouter = Router()
 
@@ -30,5 +31,6 @@ apiRouter.use('/products/:productId/stock-items', stockItemRouter)
 apiRouter.use('/products/:productId/slot-accounts', slotAccountRouter)
 apiRouter.use('/products/:productId/slot-accounts/:accountId/slots', slotRouter)
 apiRouter.use('/fulfillment-logs', fulfillmentLogRouter)
+apiRouter.use(broadcastRouter)
 
 export default apiRouter

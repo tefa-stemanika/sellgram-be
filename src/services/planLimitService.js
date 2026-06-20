@@ -135,6 +135,46 @@ export async function incrementMonthlyOrderCount(userId) {
  * Cek apakah tenant masih dalam batas order bulanan.
  * Throw error dengan kode PLAN_LIMIT_EXCEEDED jika terlampaui.
  */
+function monthlyBroadcastKey(userId) {
+  const now = new Date()
+  const yyyymm = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`
+  return `monthly_broadcasts:${userId}:${yyyymm}`
+}
+
+export async function assertMonthlyBroadcastLimit(userId, prisma) {
+  const user = await prisma.user.findUnique({ where: { id: userId } })
+  if (!user) throw new Error('User not found')
+
+  const limits = PLAN_LIMITS[user.plan]
+  if (limits.maxBroadcastsPerMonth === Infinity) return
+
+  const key = monthlyBroadcastKey(userId)
+  const cached = await redisGet(key).catch(() => null)
+  const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+  const count = cached !== null ? Number(cached) : await prisma.broadcast.count({
+    where: {
+      userId,
+      status: { in: ['SENDING', 'SENT'] },
+      createdAt: { gte: startOfMonth },
+    },
+  })
+
+  if (count >= limits.maxBroadcastsPerMonth) {
+    throw Object.assign(
+      new Error(`Batas broadcast bulanan plan ${user.plan} telah tercapai. Upgrade plan untuk menambah kapasitas.`),
+      { code: 'MONTHLY_BROADCAST_LIMIT_EXCEEDED', statusCode: 403 }
+    )
+  }
+}
+
+export async function incrementMonthlyBroadcastCount(userId) {
+  const key = monthlyBroadcastKey(userId)
+  const count = await redisIncr(key).catch(() => null)
+  if (count === 1) {
+    await redisExpire(key, MONTHLY_ORDER_TTL).catch(() => {})
+  }
+}
+
 export async function assertMonthlyOrderLimit(userId, prisma) {
   const user = await prisma.user.findUnique({ where: { id: userId } })
   if (!user) throw new Error('User not found')

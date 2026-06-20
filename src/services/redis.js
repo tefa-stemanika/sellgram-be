@@ -83,6 +83,39 @@ export async function redisRpop(key) {
   try { return JSON.parse(raw) } catch { return raw }
 }
 
+export async function redisSadd(key, value) {
+  const client = getRedisClient()
+  if (!client) return 0
+  try {
+    return await client.sadd(key, value)
+  } catch (err) {
+    console.error('[Redis] sadd error:', err.message)
+    return 0
+  }
+}
+
+export async function redisSmembers(key) {
+  const client = getRedisClient()
+  if (!client) return []
+  try {
+    return await client.smembers(key)
+  } catch (err) {
+    console.error('[Redis] smembers error:', err.message)
+    return []
+  }
+}
+
+export async function redisSrem(key, value) {
+  const client = getRedisClient()
+  if (!client) return 0
+  try {
+    return await client.srem(key, value)
+  } catch (err) {
+    console.error('[Redis] srem error:', err.message)
+    return 0
+  }
+}
+
 export async function redisExpire(key, ttl) {
   const c = getRedisClient()
   await c.expire(key, ttl)
