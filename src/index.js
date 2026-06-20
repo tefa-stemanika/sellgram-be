@@ -36,6 +36,10 @@ startWorkers()
 const subscriptionWorker = createSubscriptionWorker()
 await scheduleSubscriptionJobs()
 
+// Initialize broadcast worker
+import { createBroadcastWorker } from './workers/broadcastWorker.js'
+const broadcastWorker = createBroadcastWorker()
+
 const port = parseInt(process.env.PORT || '3000')
 const app = createApp()
 const server = app.listen(port, () => {
@@ -57,6 +61,7 @@ async function shutdown(signal) {
   server.close()
   await stopWorkers()
   await subscriptionWorker.close()
+  if (broadcastWorker) await broadcastWorker.close()
   await stopAllBots()
   await redisQuit()
   const { default: prisma } = await import('./services/db.js')

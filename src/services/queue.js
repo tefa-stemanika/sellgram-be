@@ -24,3 +24,14 @@ export const fulfillmentQueue = new Queue('fulfillment-jobs', {
   connection,
   defaultJobOptions,
 })
+
+export const broadcastQueue = new Queue('broadcast-jobs', {
+  connection,
+  limiter: { max: 25, duration: 1000 },
+  defaultJobOptions: {
+    attempts: 2,
+    backoff: { type: 'exponential', delay: 5000 },
+    removeOnComplete: 100,
+    removeOnFail: 50,
+  },
+})

@@ -41,6 +41,7 @@ model User {
   fulfillmentLogs        FulfillmentLog[]
   subscription   Subscription?
   invoices       Invoice[]
+  broadcasts     Broadcast[]
 
   @@map("users")
 }
@@ -229,8 +230,9 @@ model Customer {
 
   auth   CustomerAuth?
 
-  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  orders Order[]
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders          Order[]
+  broadcastReceipts BroadcastRecipient[]
 
   @@unique([userId, telegramId])
   @@unique([userId, email])
@@ -586,6 +588,70 @@ model FulfillmentLog {
   @@index([userId, status])
   @@index([userId, createdAt])
   @@map("fulfillment_logs")
+}
+
+// ── Broadcast ─────────────────────────────────────────────────────────────────────
+
+enum BroadcastChannel {
+  TELEGRAM
+  WHATSAPP
+  EMAIL
+}
+
+enum BroadcastStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  PAUSED
+  FAILED
+}
+
+enum BroadcastRecipientStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+model Broadcast {
+  id            String            @id @default(uuid()) @db.Uuid
+  userId        String            @map("user_id") @db.Uuid
+  name          String            @db.VarChar(255)
+  channel       BroadcastChannel  @default(TELEGRAM)
+  status        BroadcastStatus   @default(DRAFT)
+  message       String            @db.Text
+  filters       Json?             @db.JsonB
+  totalCustomers Int              @default(0) @map("total_customers")
+  sentCount     Int               @default(0) @map("sent_count")
+  failedCount   Int               @default(0) @map("failed_count")
+  scheduledAt   DateTime?         @map("scheduled_at")
+  sentAt        DateTime?         @map("sent_at")
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
+
+  user       User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recipients BroadcastRecipient[]
+
+  @@index([userId, status])
+  @@index([userId, createdAt])
+  @@map("broadcasts")
+}
+
+model BroadcastRecipient {
+  id          String                    @id @default(uuid()) @db.Uuid
+  broadcastId String                    @map("broadcast_id") @db.Uuid
+  customerId  String                    @map("customer_id") @db.Uuid
+  status      BroadcastRecipientStatus  @default(PENDING)
+  error       String?                   @db.Text
+  sentAt      DateTime?                 @map("sent_at")
+  createdAt   DateTime                  @default(now()) @map("created_at")
+
+  broadcast Broadcast @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
+  customer  Customer  @relation(fields: [customerId], references: [id])
+
+  @@unique([broadcastId, customerId])
+  @@index([broadcastId, status])
+  @@map("broadcast_recipients")
 }
 
 // ── Subscription & Billing ─────────────────────────────────────────────────────────
