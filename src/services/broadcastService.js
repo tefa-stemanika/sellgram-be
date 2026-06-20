@@ -361,7 +361,7 @@ function parseTelegramError(err) {
 
 export async function sendBroadcastMessage(userId, telegramId, message) {
   const bot = getBotForUser(userId)
-  if (!bot) throw new Error('Bot tidak aktif')
+  if (!bot) return { success: false, error: 'Bot tidak aktif', permanent: true }
 
   try {
     await bot.sendMessage(Number(telegramId), message, { parse_mode: 'Markdown' })
@@ -402,6 +402,14 @@ export async function processSingleRecipient(broadcastId, userId, customerId, ch
   }
 
   await ensureBroadcastSending(broadcastId)
+
+  const bcast = await prisma.broadcast.findUnique({
+    where: { id: broadcastId },
+    select: { status: true },
+  })
+  if (!bcast || bcast.status === 'FAILED' || bcast.status === 'SENT') {
+    return { sent: 0, failed: 0 }
+  }
 
   const customer = await prisma.customer.findFirst({
     where: { id: customerId, userId },

@@ -150,11 +150,12 @@ export async function assertMonthlyBroadcastLimit(userId, prisma) {
 
   const key = monthlyBroadcastKey(userId)
   const cached = await redisGet(key).catch(() => null)
+  const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1)
   const count = cached !== null ? Number(cached) : await prisma.broadcast.count({
     where: {
       userId,
       status: { in: ['SENDING', 'SENT'] },
-      createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) },
+      createdAt: { gte: startOfMonth },
     },
   })
 
