@@ -42,6 +42,8 @@ model User {
   subscription   Subscription?
   invoices       Invoice[]
   broadcasts     Broadcast[]
+  templates      CampaignTemplate[]
+  broadcastMappings BroadcastVariableMapping[]
 
   @@map("users")
 }
@@ -625,11 +627,14 @@ model Broadcast {
   sentCount     Int               @default(0) @map("sent_count")
   failedCount   Int               @default(0) @map("failed_count")
   scheduledAt   DateTime?         @map("scheduled_at")
-  sentAt        DateTime?         @map("sent_at")
-  createdAt     DateTime          @default(now()) @map("created_at")
-  updatedAt     DateTime          @updatedAt @map("updated_at")
+  sentAt        DateTime?                 @map("sent_at")
+  templateId    String?                   @map("template_id") @db.Uuid
+  createdAt     DateTime                  @default(now()) @map("created_at")
+  updatedAt     DateTime                  @updatedAt @map("updated_at")
 
-  user       User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  template   CampaignTemplate?       @relation(fields: [templateId], references: [id])
+  mappings   BroadcastVariableMapping[]
+  user       User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
   recipients BroadcastRecipient[]
 
   @@index([userId, status])
@@ -643,6 +648,7 @@ model BroadcastRecipient {
   customerId  String                    @map("customer_id") @db.Uuid
   status      BroadcastRecipientStatus  @default(PENDING)
   error       String?                   @db.Text
+  failureType String?                   @map("failure_type") @db.VarChar(20)  // "VALIDATION" atau "SEND_ERROR"
   sentAt      DateTime?                 @map("sent_at")
   createdAt   DateTime                  @default(now()) @map("created_at")
 
@@ -652,6 +658,43 @@ model BroadcastRecipient {
   @@unique([broadcastId, customerId])
   @@index([broadcastId, status])
   @@map("broadcast_recipients")
+}
+
+// ── Campaign Template ─────────────────────────────────────────────────────────────
+
+model CampaignTemplate {
+  id            String           @id @default(uuid()) @db.Uuid
+  userId        String           @map("user_id") @db.Uuid
+  name          String           @db.VarChar(255)
+  channel       BroadcastChannel @default(TELEGRAM)
+  content       String           @db.Text
+  variableCount Int              @default(0) @map("variable_count")
+  variables     Json?            @db.JsonB   // [{"index":1,"label":"Nama","sample":"Budi"}, ...]
+  createdAt     DateTime         @default(now()) @map("created_at")
+  updatedAt     DateTime         @updatedAt @map("updated_at")
+
+  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  broadcasts Broadcast[]
+
+  @@index([userId, createdAt])
+  @@map("campaign_templates")
+}
+
+model BroadcastVariableMapping {
+  id            String   @id @default(uuid()) @db.Uuid
+  broadcastId   String   @map("broadcast_id") @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  variableIndex Int      @map("variable_index")
+  sourceType    String   @map("source_type")    // CUSTOMER_FIELD, STATIC_VALUE, DERIVED_FIELD
+  sourceValue   String   @map("source_value")   // field name / static value / derived type
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  broadcast Broadcast @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([broadcastId, variableIndex])
+  @@index([broadcastId])
+  @@map("broadcast_variable_mappings")
 }
 
 // ── Subscription & Billing ─────────────────────────────────────────────────────────

@@ -90,8 +90,9 @@ export async function getUserQuota(req, res, next) {
     const now = new Date()
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
 
-    const [productCount, broadcastCount, orderCount] = await Promise.all([
+    const [productCount, templateCount, broadcastCount, orderCount] = await Promise.all([
       prisma.product.count({ where: { userId, deletedAt: null } }),
+      prisma.campaignTemplate.count({ where: { userId } }),
       prisma.broadcast.count({ where: { userId, status: 'SENT', createdAt: { gte: startOfMonth } } }),
       prisma.order.count({ where: { userId, status: 'COMPLETED', paidAt: { gte: startOfMonth } } }),
     ])
@@ -101,6 +102,10 @@ export async function getUserQuota(req, res, next) {
       products: {
         used: productCount,
         total: limits.products === Infinity ? 'Unlimited' : limits.products,
+      },
+      templates: {
+        used: templateCount,
+        total: limits.templates === Infinity ? 'Unlimited' : limits.templates,
       },
       broadcastsPerMonth: {
         used: broadcastCount,

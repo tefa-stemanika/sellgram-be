@@ -15,26 +15,29 @@ export const PLAN_LIMITS = {
   FREE: {
     botConfigs: 1,
     products: 10,
+    templates: 1,
     maxBroadcastsPerMonth: 0,
     maxOrdersPerMonth: 10,
   },
   STARTER: {
     botConfigs: 1,
     products: 50,
+    templates: 5,
     maxBroadcastsPerMonth: 50,
     maxOrdersPerMonth: 200,
   },
   PRO: {
     botConfigs: 1,
     products: Infinity,
+    templates: Infinity,
     maxBroadcastsPerMonth: Infinity,
     maxOrdersPerMonth: Infinity,
   },
 }
 
 export const PLAN_PRICES = {
-  STARTER: { MONTHLY: 35000, YEARLY: 350000 },
-  PRO:     { MONTHLY: 100000, YEARLY: 1000000 },
+  STARTER: { MONTHLY: 39_000, YEARLY: 390_000 },
+  PRO:     { MONTHLY: 79_000, YEARLY: 790_000 },
 }
 
 /**
@@ -63,6 +66,17 @@ export async function assertWithinLimit(userId, resource, prisma) {
     if (count >= limits.products) {
       throw Object.assign(
         new Error(`Plan ${user.plan} hanya mendukung ${limits.products} produk`),
+        { code: 'PLAN_LIMIT_EXCEEDED', statusCode: 403 }
+      )
+    }
+  }
+
+  if (resource === 'template') {
+    if (limits.templates === Infinity) return
+    const count = await prisma.campaignTemplate.count({ where: { userId } })
+    if (count >= limits.templates) {
+      throw Object.assign(
+        new Error(`Plan ${user.plan} hanya mendukung ${limits.templates} template`),
         { code: 'PLAN_LIMIT_EXCEEDED', statusCode: 403 }
       )
     }

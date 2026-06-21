@@ -1,4 +1,4 @@
-# Broadcast — API Documentation
+# Broadcast & Template — API Documentation
 
 > Base URL: `/api`  
 > Auth: All endpoints require `Authorization: Bearer <jwt>` header.  
@@ -66,7 +66,31 @@ Error response:
 |-------|------------|
 | `PENDING` | Menunggu dikirim |
 | `SENT` | Berhasil terkirim |
-| `FAILED` | Gagal dikirim (blocked, invalid ID, dll) |
+| `FAILED` | Gagal dikirim |
+
+### SourceType (Variable Mapping)
+
+| Value | Keterangan |
+|-------|------------|
+| `CUSTOMER_FIELD` | Ambil nilai dari field `Customer` (`name`, `phone`, `email`, `username`) |
+| `STATIC_VALUE` | Nilai statis yang sama untuk semua customer |
+| `DERIVED_FIELD` | Nilai turunan dari data order customer |
+
+### DerivedFieldType
+
+| Value | Keterangan |
+|-------|------------|
+| `TOTAL_ORDERS` | Jumlah order COMPLETED customer |
+| `TOTAL_SPENT` | Total belanja customer (format Rp) |
+| `LAST_ORDER_DATE` | Tanggal order terakhir |
+| `LAST_PRODUCT_NAME` | Nama produk dari order terakhir |
+
+### RecipientFailureType
+
+| Value | Keterangan |
+|-------|------------|
+| `VALIDATION` | Gagal karena data customer tidak lengkap |
+| `SEND_ERROR` | Gagal karena error pengiriman (blocked, network, dll) |
 
 ---
 
@@ -107,6 +131,7 @@ curl -H "Authorization: Bearer <jwt>" \
       "channel": "TELEGRAM",
       "status": "SENDING",
       "message": "Halo! Dapatkan diskon 50%...",
+      "templateId": null,
       "filters": { "hasTelegram": "true", "totalSpentMin": "100000" },
       "totalCustomers": 250,
       "sentCount": 120,
@@ -121,11 +146,13 @@ curl -H "Authorization: Bearer <jwt>" \
 }
 ```
 
+> `templateId` akan terisi jika broadcast dibuat dari template. `message` berisi snapshot teks template (tidak berubah jika template diedit setelah broadcast dikirim).
+
 ---
 
 ### POST /broadcasts
 
-Buat broadcast campaign baru. Status otomatis `DRAFT`. Jika `scheduledAt` diisi, status jadi `SCHEDULED`.
+Buat broadcast campaign biasa (tanpa template). Status otomatis `DRAFT`. Jika `scheduledAt` diisi, status jadi `SCHEDULED`.
 
 **Request body:**
 
@@ -158,27 +185,9 @@ curl -X POST -H "Authorization: Bearer <jwt>" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Promo Akhir Tahun",
-    "message": "Halo! 🎉\n\nDapatkan diskon 50% untuk semua produk!\n\nKlik /pesan untuk order sekarang.",
+    "message": "Halo! 🎉 Dapatkan diskon 50%...",
     "channel": "TELEGRAM",
-    "filters": {
-      "hasTelegram": "true",
-      "totalSpentMin": 100000
-    }
-  }' \
-  http://localhost:3000/api/broadcasts
-```
-
-**Contoh — Terjadwal:**
-
-```bash
-curl -X POST -H "Authorization: Bearer <jwt>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Ucapan HUT",
-    "message": "Selamat ulang tahun! 🎂\n\nNikmati voucher diskon spesial untuk kamu.",
-    "channel": "TELEGRAM",
-    "filters": {},
-    "scheduledAt": "2025-07-01T08:00:00.000Z"
+    "filters": { "hasTelegram": "true" }
   }' \
   http://localhost:3000/api/broadcasts
 ```
@@ -191,22 +200,12 @@ curl -X POST -H "Authorization: Bearer <jwt>" \
   "message": "Broadcast berhasil dibuat",
   "data": {
     "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-    "userId": "a1b2c3d4-1234-5678-9abc-def012345678",
     "name": "Promo Akhir Tahun",
-    "channel": "TELEGRAM",
     "status": "DRAFT",
-    "message": "Halo! 🎉\n\nDapatkan diskon 50%...",
-    "filters": {
-      "hasTelegram": "true",
-      "totalSpentMin": 100000
-    },
+    "message": "Halo! 🎉 Dapatkan diskon 50%...",
+    "templateId": null,
     "totalCustomers": 42,
-    "sentCount": 0,
-    "failedCount": 0,
-    "scheduledAt": null,
-    "sentAt": null,
-    "createdAt": "2025-06-20T10:00:00.000Z",
-    "updatedAt": "2025-06-20T10:00:00.000Z"
+    "createdAt": "2025-06-20T10:00:00.000Z"
   }
 }
 ```
@@ -221,12 +220,88 @@ curl -X POST -H "Authorization: Bearer <jwt>" \
 }
 ```
 
-**Response (400 — tidak ada customer cocok):**
+---
+
+### POST /broadcasts/from-template
+
+Buat broadcast baru dari template. Sistem akan menyimpan mapping variabel dan snapshot teks template.
+
+**Request body:**
+
+| Field | Tipe | Required | Keterangan |
+|-------|------|----------|------------|
+| `name` | string | ✅ | Nama campaign |
+| `templateId` | string (UUID) | ✅ | ID template yang akan digunakan |
+| `mappings` | array | ✅ | Array mapping variabel — lihat tabel di bawah |
+| `channel` | enum | opsional | `TELEGRAM` (default) |
+| `filters` | object | opsional | Filter customer |
+| `scheduledAt` | string (ISO 8601) | opsional | Jadwal pengiriman |
+
+**Mapping item (`mappings[]`):**
+
+| Field | Tipe | Required | Keterangan |
+|-------|------|----------|------------|
+| `variableIndex` | number | ✅ | Nomor variabel (`1`, `2`, `3`, dst) |
+| `sourceType` | string | ✅ | `CUSTOMER_FIELD`, `STATIC_VALUE`, atau `DERIVED_FIELD` |
+| `sourceValue` | string | ✅ | Nama field / nilai statis / tipe derived |
+
+**Mapping sourceValue berdasarkan sourceType:**
+
+| sourceType | sourceValue | Contoh |
+|------------|-------------|--------|
+| `CUSTOMER_FIELD` | `name`, `phone`, `email`, `username` | `"name"` |
+| `STATIC_VALUE` | Nilai teks bebas | `"PROMO50"` |
+| `DERIVED_FIELD` | `TOTAL_ORDERS`, `TOTAL_SPENT`, `LAST_ORDER_DATE`, `LAST_PRODUCT_NAME` | `"TOTAL_SPENT"` |
+
+**Validasi:**
+- Semua variabel yang terdeteksi di template (`{{1}}`, `{{2}}`, ...) WAJIB di-mapping
+- `sourceType` harus salah satu dari: `CUSTOMER_FIELD`, `STATIC_VALUE`, `DERIVED_FIELD`
+- `sourceValue` wajib diisi
+
+**Contoh:**
+
+Template yang dipakai: `"Halo {{1}}, promo {{2}} buat kamu! Total belanja: {{3}}"`
+
+```bash
+curl -X POST -H "Authorization: Bearer <jwt>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Promo dari Template",
+    "templateId": "template-uuid-123",
+    "mappings": [
+      { "variableIndex": 1, "sourceType": "CUSTOMER_FIELD", "sourceValue": "name" },
+      { "variableIndex": 2, "sourceType": "STATIC_VALUE", "sourceValue": "DISKON50" },
+      { "variableIndex": 3, "sourceType": "DERIVED_FIELD", "sourceValue": "TOTAL_SPENT" }
+    ],
+    "filters": { "hasTelegram": "true" }
+  }' \
+  http://localhost:3000/api/broadcasts/from-template
+```
+
+**Response (201):**
+
+```json
+{
+  "success": true,
+  "message": "Broadcast dari template berhasil dibuat",
+  "data": {
+    "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "name": "Promo dari Template",
+    "templateId": "template-uuid-123",
+    "status": "DRAFT",
+    "message": "Halo {{1}}, promo {{2}} buat kamu! Total belanja: {{3}}",
+    "totalCustomers": 150,
+    "createdAt": "2025-06-20T10:00:00.000Z"
+  }
+}
+```
+
+**Response (400 — mapping tidak lengkap):**
 
 ```json
 {
   "success": false,
-  "message": "Tidak ada customer yang cocok dengan filter"
+  "message": "Variabel {{3}} belum di-mapping. Semua variabel template harus di-mapping."
 }
 ```
 
@@ -234,25 +309,12 @@ curl -X POST -H "Authorization: Bearer <jwt>" \
 
 ### POST /broadcasts/preview
 
-Preview jumlah customer yang cocok dengan filter (sebelum membuat broadcast). Berguna untuk estimasi sebelum kirim.
-
-**Request body:**
-
-| Field | Tipe | Required | Keterangan |
-|-------|------|----------|------------|
-| `filters` | object | opsional | Sama seperti filter di create. Jika kosong, hitung semua customer. |
-
-**Contoh:**
+Preview jumlah customer yang cocok dengan filter (sebelum membuat broadcast).
 
 ```bash
 curl -X POST -H "Authorization: Bearer <jwt>" \
   -H "Content-Type: application/json" \
-  -d '{
-    "filters": {
-      "hasTelegram": "true",
-      "totalSpentMin": 50000
-    }
-  }' \
+  -d '{"filters": { "hasTelegram": "true" } }' \
   http://localhost:3000/api/broadcasts/preview
 ```
 
@@ -262,29 +324,15 @@ curl -X POST -H "Authorization: Bearer <jwt>" \
 {
   "success": true,
   "message": "Preview berhasil",
-  "data": {
-    "customers": [
-      {
-        "id": "customer-uuid-1",
-        "name": "Budi Santoso",
-        "telegramId": "123456789",
-        "hasTelegram": true,
-        "phone": "08123456789",
-        "email": "budi@example.com"
-      }
-    ],
-    "total": 42
-  }
+  "data": { "customers": [...], "total": 42 }
 }
 ```
-
-> `customers` hanya berisi maksimal 20 sample. Gunakan `total` untuk estimasi jumlah sebenarnya.
 
 ---
 
 ### GET /broadcasts/:id
 
-Detail satu broadcast — termasuk sent/failed/pending counts real-time.
+Detail satu broadcast — termasuk sent/failed/pending counts real-time dan informasi template.
 
 **Contoh:**
 
@@ -301,16 +349,16 @@ curl -H "Authorization: Bearer <jwt>" \
   "message": "OK",
   "data": {
     "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-    "userId": "a1b2c3d4-1234-5678-9abc-def012345678",
-    "name": "Promo Akhir Tahun",
+    "name": "Promo dari Template",
     "channel": "TELEGRAM",
     "status": "SENDING",
-    "message": "Halo! 🎉 Dapatkan diskon 50%...",
+    "message": "Halo {{1}}, promo {{2}} buat kamu! Total belanja: {{3}}",
+    "templateId": "template-uuid-123",
     "filters": { "hasTelegram": "true" },
-    "totalCustomers": 250,
+    "totalCustomers": 150,
     "sentCount": 120,
     "failedCount": 3,
-    "pendingCount": 127,
+    "pendingCount": 27,
     "isPaused": false,
     "scheduledAt": null,
     "sentAt": null,
@@ -320,7 +368,8 @@ curl -H "Authorization: Bearer <jwt>" \
 }
 ```
 
-> Field `pendingCount` dan `isPaused` adalah computed — tidak ada di database, dihitung real-time.
+> Jika broadcast dibuat dari template, `message` berisi snapshot teks template dengan placeholder (`{{1}}`, `{{2}}`, dst).  
+> Gunakan `POST /broadcasts/:id/preview-render` untuk melihat hasil render dengan data customer asli.
 
 **Response (404):**
 
@@ -342,24 +391,10 @@ Update broadcast — hanya bisa untuk status `DRAFT` atau `SCHEDULED`.
 | Field | Tipe | Keterangan |
 |-------|------|------------|
 | `name` | string | Nama baru |
-| `message` | string | Pesan baru |
+| `message` | string | Pesan baru (hanya jika tanpa template) |
 | `channel` | enum | `TELEGRAM`, `WHATSAPP`, `EMAIL` |
 | `filters` | object | Filter baru — akan recalculate `totalCustomers` |
 | `scheduledAt` | string (ISO 8601) | Jadwal baru. Set `null` untuk hapus jadwal. |
-
-> Jika broadcast berstatus `SCHEDULED` dan `name`/`message`/`filters` diubah, job terjadwal akan dibatalkan dan dibuat ulang.
-
-**Contoh:**
-
-```bash
-curl -X PATCH -H "Authorization: Bearer <jwt>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Promo Akhir Tahun (Updated)",
-    "message": "Halo! Diskon 50% berlaku sampai minggu depan! 🎉"
-  }' \
-  http://localhost:3000/api/broadcasts/f47ac10b-58cc-4372-a567-0e02b2c3d479
-```
 
 **Response (200):**
 
@@ -367,22 +402,7 @@ curl -X PATCH -H "Authorization: Bearer <jwt>" \
 {
   "success": true,
   "message": "Broadcast berhasil diperbarui",
-  "data": {
-    "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-    "name": "Promo Akhir Tahun (Updated)",
-    "message": "Halo! Diskon 50% berlaku sampai minggu depan! 🎉",
-    "status": "DRAFT",
-    "updatedAt": "2025-06-20T11:00:00.000Z"
-  }
-}
-```
-
-**Response (400):**
-
-```json
-{
-  "success": false,
-  "message": "Hanya broadcast DRAFT atau SCHEDULED yang bisa diedit"
+  "data": { "name": "Promo (Updated)", "status": "DRAFT" }
 }
 ```
 
@@ -390,9 +410,7 @@ curl -X PATCH -H "Authorization: Bearer <jwt>" \
 
 ### DELETE /broadcasts/:id
 
-Hapus broadcast — hanya bisa untuk status `DRAFT` atau `SCHEDULED`. Jika `SCHEDULED`, job di queue akan dibatalkan.
-
-**Contoh:**
+Hapus broadcast — hanya bisa untuk status `DRAFT` atau `SCHEDULED`.
 
 ```bash
 curl -X DELETE -H "Authorization: Bearer <jwt>" \
@@ -411,84 +429,124 @@ curl -X DELETE -H "Authorization: Bearer <jwt>" \
 
 ---
 
-## 2. Send, Pause, Resume, Cancel
+## 2. Preview & Dry-Run (Template)
+
+### POST /broadcasts/:id/preview-render
+
+Preview hasil render pesan untuk 1 sample customer. Berguna untuk cek apakah mapping sudah benar sebelum kirim.
+
+Untuk broadcast dari template: sistem akan mengambil 1 customer sample, resolve semua mapping, dan menampilkan teks final. Jika ada variabel yang gagal di-resolve (data customer kosong), akan muncul di `errors`.
+
+Untuk broadcast tanpa template: mengembalikan `message` langsung.
+
+**Contoh:**
+
+```bash
+curl -X POST -H "Authorization: Bearer <jwt>" \
+  http://localhost:3000/api/broadcasts/f47ac10b-58cc-4372-a567-0e02b2c3d479/preview-render
+```
+
+**Response (200 — sukses):**
+
+```json
+{
+  "success": true,
+  "message": "Preview render berhasil",
+  "data": {
+    "rendered": "Halo Budi Santoso, promo DISKON50 buat kamu! Total belanja: Rp 250.000",
+    "errors": []
+  }
+}
+```
+
+**Response (200 — ada error validasi):**
+
+```json
+{
+  "success": true,
+  "message": "Preview render berhasil",
+  "data": {
+    "rendered": "Halo [Sample {{1}}], promo DISKON50 buat kamu! Total belanja: [Sample {{3}}]",
+    "errors": [
+      "Variabel {{1}} (Customer.name) kosong untuk customer ini",
+      "Variabel {{3}} (TOTAL_SPENT) gagal di-resolve untuk customer ini"
+    ]
+  }
+}
+```
+
+> `rendered` tetap diisi dengan sample/placeholder untuk variabel yang gagal, supaya UI tetap bisa menampilkan preview.
+
+---
+
+### POST /broadcasts/:id/dry-run
+
+Dry-run validasi — menghitung berapa customer yang akan gagal validasi (data tidak lengkap) tanpa benar-benar mengirim pesan. Berguna untuk estimasi sebelum trigger send.
+
+Sistem akan mengambil sample 500 customer pertama, render template untuk masing-masing, dan melaporkan jumlah yang gagal beserta sample error-nya.
+
+**Contoh:**
+
+```bash
+curl -X POST -H "Authorization: Bearer <jwt>" \
+  http://localhost:3000/api/broadcasts/f47ac10b-58cc-4372-a567-0e02b2c3d479/dry-run
+```
+
+**Response (200):**
+
+```json
+{
+  "success": true,
+  "message": "Dry-run selesai",
+  "data": {
+    "total": 500,
+    "invalidCount": 12,
+    "invalidSamples": [
+      {
+        "customerId": "cust-uuid-1",
+        "name": "Budi Santoso",
+        "errors": [
+          "Variabel {{1}} (Customer.name) kosong untuk customer ini"
+        ]
+      }
+    ]
+  }
+}
+```
+
+> Dry-run hanya memproses 500 customer pertama. Untuk total keseluruhan, lihat `GET /broadcasts/:id` → `totalCustomers`.
+
+---
+
+## 3. Send, Pause, Resume, Cancel
 
 ### POST /broadcasts/:id/send
 
-Mulai kirim broadcast. Mengubah status dari `DRAFT` atau `SCHEDULED` menjadi `SENDING`, membuat `BroadcastRecipient` records, dan men-*enqueue* 1 job per recipient ke BullMQ.
+Mulai kirim broadcast. Untuk broadcast dari template, sistem akan:
+1. Cek semua variabel template sudah di-mapping
+2. Per recipient: render template → validasi data → kirim (atau skip jika validasi gagal)
 
 **Cek sebelum kirim:**
 - Monthly broadcast limit (STARTER: 50/bulan, PRO: unlimited)
 - Batas recipient per broadcast (STARTER: 1000, PRO: unlimited)
 - Bot Telegram aktif
 - Minimal ada 1 customer yang cocok
-
-**Contoh:**
+- (Jika dari template) Semua variabel sudah di-mapping
 
 ```bash
 curl -X POST -H "Authorization: Bearer <jwt>" \
   http://localhost:3000/api/broadcasts/f47ac10b-58cc-4372-a567-0e02b2c3d479/send
 ```
 
-**Response (200):**
-
-```json
-{
-  "success": true,
-  "message": "Broadcast sedang dikirim",
-  "data": {
-    "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-    "status": "DRAFT",
-    "totalCustomers": 250
-  }
-}
-```
-
-> Data yang dikembalikan adalah snapshot sebelum status diubah. Gunakan `GET /broadcasts/:id` untuk cek status real-time.
-
-**Response (403 — limit bulanan):**
-
-```json
-{
-  "success": false,
-  "message": "Batas broadcast bulanan plan STARTER telah tercapai. Upgrade plan untuk menambah kapasitas."
-}
-```
-
-**Response (400 — limit per broadcast):**
-
-```json
-{
-  "success": false,
-  "message": "Plan STARTER maksimal 1000 penerima per broadcast. 1500 customer cocok. Persempit filter."
-}
-```
-
 ---
 
 ### POST /broadcasts/:id/pause
 
-Pause broadcast yang sedang `SENDING`. Job yang sedang berjalan akan tetap selesai, tapi job baru akan di-*skip* (recipient tetap `PENDING`).
-
-**Contoh:**
+Pause broadcast yang sedang `SENDING`.
 
 ```bash
 curl -X POST -H "Authorization: Bearer <jwt>" \
   http://localhost:3000/api/broadcasts/f47ac10b-58cc-4372-a567-0e02b2c3d479/pause
-```
-
-**Response (200):**
-
-```json
-{
-  "success": true,
-  "message": "Broadcast di-pause",
-  "data": {
-    "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-    "status": "PAUSED",
-    "updatedAt": "2025-06-20T12:00:00.000Z"
-  }
-}
 ```
 
 ---
@@ -497,68 +555,29 @@ curl -X POST -H "Authorization: Bearer <jwt>" \
 
 Resume broadcast yang `PAUSED`. Semua recipient `PENDING` akan di-*enqueue* ulang.
 
-**Contoh:**
-
 ```bash
 curl -X POST -H "Authorization: Bearer <jwt>" \
   http://localhost:3000/api/broadcasts/f47ac10b-58cc-4372-a567-0e02b2c3d479/resume
-```
-
-**Response (200):**
-
-```json
-{
-  "success": true,
-  "message": "Broadcast dilanjutkan",
-  "data": {
-    "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-    "status": "SENDING"
-  }
-}
 ```
 
 ---
 
 ### POST /broadcasts/:id/cancel
 
-Batalkan broadcast. Semua job di queue akan dihapus, status diubah ke `FAILED`. Cocok untuk membatalkan broadcast yang `SCHEDULED` atau `SENDING`.
-
-**Contoh:**
+Batalkan broadcast. Status diubah ke `FAILED`.
 
 ```bash
 curl -X POST -H "Authorization: Bearer <jwt>" \
   http://localhost:3000/api/broadcasts/f47ac10b-58cc-4372-a567-0e02b2c3d479/cancel
 ```
 
-**Response (200):**
-
-```json
-{
-  "success": true,
-  "message": "Broadcast dibatalkan",
-  "data": {
-    "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-    "status": "FAILED"
-  }
-}
-```
-
-**Response (400):**
-
-```json
-{
-  "success": false,
-  "message": "Broadcast sudah selesai"
-}
-```
-
 ---
 
-## 3. Broadcast Recipients
+## 4. Broadcast Recipients
 
 ### GET /broadcasts/:id/recipients
 
-Daftar recipient untuk suatu broadcast (paginated). Bisa difilter berdasarkan status.
+Daftar recipient untuk suatu broadcast (paginated). Bisa difilter berdasarkan status dan failureType.
 
 **Query params:**
 
@@ -568,14 +587,14 @@ Daftar recipient untuk suatu broadcast (paginated). Bisa difilter berdasarkan st
 | `page` | number | Default `1` |
 | `limit` | number | Default `20` |
 
-**Contoh:**
+**Contoh — filter FAILED:**
 
 ```bash
 curl -H "Authorization: Bearer <jwt>" \
   "http://localhost:3000/api/broadcasts/f47ac10b-58cc-4372-a567-0e02b2c3d479/recipients?status=FAILED&page=1&limit=10"
 ```
 
-**Response (200):**
+**Response (200 — FAILED karena VALIDATION):**
 
 ```json
 {
@@ -587,12 +606,13 @@ curl -H "Authorization: Bearer <jwt>" \
       "broadcastId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
       "customerId": "customer-uuid-1",
       "status": "FAILED",
-      "error": "Akun Telegram tidak aktif/memblokir bot",
+      "failureType": "VALIDATION",
+      "error": "Variabel {{1}} (Customer.name) kosong untuk customer ini",
       "sentAt": null,
       "createdAt": "2025-06-20T10:00:00.000Z",
       "customer": {
         "id": "customer-uuid-1",
-        "name": "Budi Santoso",
+        "name": null,
         "username": "budi_s",
         "telegramId": "123456789",
         "phone": "08123456789",
@@ -600,11 +620,61 @@ curl -H "Authorization: Bearer <jwt>" \
       }
     }
   ],
+  "metadata": { "total": 12, "page": 1, "limit": 10, "totalPages": 2 }
+}
+```
+
+**Response (200 — FAILED karena SEND_ERROR):**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "b1b2c3d4-2222-3333-4444-555566667777",
+      "status": "FAILED",
+      "failureType": "SEND_ERROR",
+      "error": "Akun Telegram tidak aktif/memblokir bot",
+      "customer": {
+        "id": "customer-uuid-2",
+        "name": "Siti Nurhaliza",
+        "telegramId": "987654321"
+      }
+    }
+  ],
   "metadata": { "total": 3, "page": 1, "limit": 10, "totalPages": 1 }
 }
 ```
 
-**Response (200 — SENT):**
+> `failureType` memudahkan frontend membedakan:
+> - `VALIDATION` → data customer tidak lengkap, perlu dilengkapi dulu
+> - `SEND_ERROR` → masalah teknis (blocked, network), bisa di-retry
+
+---
+
+## 5. Campaign Templates
+
+### GET /templates
+
+Daftar semua template (paginated).
+
+**Query params:**
+
+| Param | Tipe | Keterangan |
+|-------|------|------------|
+| `page` | number | Default `1` |
+| `limit` | number | Default `20` |
+| `sortBy` | string | `createdAt` (default), `name`, `updatedAt`, `variableCount` |
+| `sortDir` | string | `desc` (default) atau `asc` |
+
+**Contoh:**
+
+```bash
+curl -H "Authorization: Bearer <jwt>" \
+  "http://localhost:3000/api/templates?page=1&limit=20"
+```
+
+**Response (200):**
 
 ```json
 {
@@ -612,89 +682,336 @@ curl -H "Authorization: Bearer <jwt>" \
   "message": "OK",
   "data": [
     {
-      "id": "c1b2c3d4-2222-3333-4444-555566667777",
-      "broadcastId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-      "customerId": "customer-uuid-2",
-      "status": "SENT",
-      "error": null,
-      "sentAt": "2025-06-20T10:05:30.000Z",
+      "id": "template-uuid-123",
+      "userId": "a1b2c3d4-1234-5678-9abc-def012345678",
+      "name": "Promo Umum",
+      "channel": "TELEGRAM",
+      "content": "Halo {{1}}, promo {{2}} buat kamu!",
+      "variableCount": 2,
+      "variables": [
+        { "index": 1, "label": "Nama Customer", "sample": "Budi Santoso" },
+        { "index": 2, "label": "Kode Promo", "sample": "PROMO50" }
+      ],
       "createdAt": "2025-06-20T10:00:00.000Z",
-      "customer": {
-        "id": "customer-uuid-2",
-        "name": "Siti Nurhaliza",
-        "username": "siti_n",
-        "telegramId": "987654321",
-        "phone": null,
-        "email": null
-      }
+      "updatedAt": "2025-06-20T10:00:00.000Z"
     }
   ],
-  "metadata": { "total": 247, "page": 1, "limit": 10, "totalPages": 25 }
+  "metadata": { "total": 1, "page": 1, "limit": 20, "totalPages": 1 }
 }
 ```
 
 ---
 
-## 4. Plan Limits
+### POST /templates
 
-Limit broadcast berdasarkan plan tenant (didefinisikan di `planLimitService.js`):
+Buat template baru. Sistem akan auto-detect jumlah variabel dari `{{n}}` di teks. Setiap variabel WAJIB memiliki label.
 
-| Plan | Bisa Broadcast? | Maks/bulan | Maks/ broadcast |
-|------|----------------|------------|-----------------|
-| `FREE` | ❌ Tidak | 0 | 0 |
-| `STARTER` | ✅ Ya | 50 | 1.000 recipient |
-| `PRO` | ✅ Ya | Tak terbatas | Tak terbatas |
+**Request body:**
+
+| Field | Tipe | Required | Keterangan |
+|-------|------|----------|------------|
+| `name` | string | ✅ | Nama template |
+| `content` | string | ✅ | Teks dengan placeholder `{{1}}`, `{{2}}`, dst |
+| `channel` | enum | opsional | `TELEGRAM` (default) |
+| `variables` | array | ✅ | Array metadata variabel — lihat tabel di bawah |
+
+**Variable item (`variables[]`):**
+
+| Field | Tipe | Required | Keterangan |
+|-------|------|----------|------------|
+| `index` | number | ✅ | Nomor variabel (`1`, `2`, dst) |
+| `label` | string | ✅ | Label deskriptif (ditampilkan di UI saat mapping) |
+| `sample` | string | opsional | Contoh nilai untuk preview. Default: `"[Sample {{n}}]"` |
+
+**Validasi:**
+- Setiap `{{n}}` yang terdeteksi di `content` WAJIB memiliki item di `variables` dengan `index` yang sesuai
+- Setiap variabel di `variables` WAJIB memiliki `label`
+- Maksimal 20 variabel per template
+
+**Contoh:**
+
+```bash
+curl -X POST -H "Authorization: Bearer <jwt>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Promo Umum",
+    "content": "Halo {{1}}, promo {{2}} buat kamu! Total belanja: {{3}}",
+    "variables": [
+      { "index": 1, "label": "Nama Customer", "sample": "Budi Santoso" },
+      { "index": 2, "label": "Kode Promo", "sample": "PROMO50" },
+      { "index": 3, "label": "Total Belanja", "sample": "Rp 50.000" }
+    ]
+  }' \
+  http://localhost:3000/api/templates
+```
+
+**Response (201):**
+
+```json
+{
+  "success": true,
+  "message": "Template berhasil dibuat",
+  "data": {
+    "id": "template-uuid-123",
+    "name": "Promo Umum",
+    "channel": "TELEGRAM",
+    "content": "Halo {{1}}, promo {{2}} buat kamu! Total belanja: {{3}}",
+    "variableCount": 3,
+    "variables": [
+      { "index": 1, "label": "Nama Customer", "sample": "Budi Santoso" },
+      { "index": 2, "label": "Kode Promo", "sample": "PROMO50" },
+      { "index": 3, "label": "Total Belanja", "sample": "Rp 50.000" }
+    ],
+    "createdAt": "2025-06-20T10:00:00.000Z"
+  }
+}
+```
+
+**Response (400 — variabel tanpa label):**
+
+```json
+{
+  "success": false,
+  "message": "Variabel {{2}} wajib memiliki label"
+}
+```
+
+**Response (403 — limit template):**
+
+```json
+{
+  "success": false,
+  "code": "PLAN_LIMIT_EXCEEDED",
+  "message": "Plan STARTER hanya mendukung 5 template"
+}
+```
 
 ---
 
-## 5. Flow Diagram (Frontend)
+### GET /templates/:id
 
-### Flow DRAFT → SENDING
+Detail satu template — termasuk preview hasil render dengan sample values.
+
+**Contoh:**
+
+```bash
+curl -H "Authorization: Bearer <jwt>" \
+  http://localhost:3000/api/templates/template-uuid-123
+```
+
+**Response (200):**
+
+```json
+{
+  "success": true,
+  "message": "OK",
+  "data": {
+    "id": "template-uuid-123",
+    "name": "Promo Umum",
+    "content": "Halo {{1}}, promo {{2}} buat kamu!",
+    "variableCount": 2,
+    "variables": [
+      { "index": 1, "label": "Nama Customer", "sample": "Budi Santoso" },
+      { "index": 2, "label": "Kode Promo", "sample": "PROMO50" }
+    ],
+    "preview": "Halo Budi Santoso, promo PROMO50 buat kamu!",
+    "createdAt": "2025-06-20T10:00:00.000Z",
+    "updatedAt": "2025-06-20T10:00:00.000Z"
+  }
+}
+```
+
+> Field `preview` adalah hasil render `content` dengan sample values dari `variables[]`.
+
+---
+
+### PATCH /templates/:id
+
+Update template. Hanya field yang dikirim yang akan diubah.
+
+**Request body:** (semua field opsional)
+
+| Field | Tipe | Keterangan |
+|-------|------|------------|
+| `name` | string | Nama baru |
+| `content` | string | Teks baru (akan re-detect variableCount) |
+| `variables` | array | Metadata variabel baru (wajib jika `content` diubah) |
+
+> Jika `content` diubah, `variables` wajib mencakup semua variabel yang terdeteksi.
+
+**Contoh:**
+
+```bash
+curl -X PATCH -H "Authorization: Bearer <jwt>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Promo Umum (Updated)"
+  }' \
+  http://localhost:3000/api/templates/template-uuid-123
+```
+
+**Response (200):**
+
+```json
+{
+  "success": true,
+  "message": "Template berhasil diperbarui",
+  "data": {
+    "id": "template-uuid-123",
+    "name": "Promo Umum (Updated)",
+    "updatedAt": "2025-06-20T11:00:00.000Z"
+  }
+}
+```
+
+---
+
+### DELETE /templates/:id
+
+Hapus template. Hanya bisa jika tidak ada broadcast aktif (`DRAFT`, `SCHEDULED`, `SENDING`) yang masih menggunakan template ini. Broadcast yang sudah `SENT` atau `FAILED` tidak masalah (template sudah di-snapshot di `Broadcast.message`).
+
+```bash
+curl -X DELETE -H "Authorization: Bearer <jwt>" \
+  http://localhost:3000/api/templates/template-uuid-123
+```
+
+**Response (200):**
+
+```json
+{
+  "success": true,
+  "message": "Template berhasil dihapus",
+  "data": null
+}
+```
+
+**Response (400 — masih dipakai):**
+
+```json
+{
+  "success": false,
+  "message": "Tidak bisa menghapus template yang masih dipakai oleh 2 broadcast aktif."
+}
+```
+
+---
+
+## 6. Plan Limits
+
+| Plan | Broadcast | Maks/bulan | Maks/ broadcast | Templates |
+|------|-----------|------------|-----------------|-----------|
+| `FREE` | ❌ | 0 | 0 | 1 |
+| `STARTER` | ✅ | 50 | 1.000 recipient | 5 |
+| `PRO` | ✅ | Tak terbatas | Tak terbatas | Tak terbatas |
+
+---
+
+## 7. Flow Diagram (Frontend)
+
+### Flow Template → Broadcast
 
 ```
-[Buat] → POST /broadcasts → DRAFT
-  ↓
+[Buat Template] → POST /templates → (auto-detect variables)
+     ↓
+[Halaman Template] → GET /templates/:id (lihat preview)
+     ↓
+[Buat Campaign dari Template] → POST /broadcasts/from-template
+     ↓  mapping: {{1}} → Customer.name, {{2}} → static "PROMO50"
+[DRAFT]
+     ↓
+[Preview Render] → POST /broadcasts/:id/preview-render
+     ↓
+[Dry-Run] → POST /broadcasts/:id/dry-run (cek validasi)
+     ↓
 [Kirim] → POST /broadcasts/:id/send
-  ↓
-[Polling] → GET /broadcasts/:id (cek sentCount, pendingCount, failedCount)
-  ↓
-Status → SENT (semua pending = 0)
+     ↓
+[Polling] → GET /broadcasts/:id (sentCount, failedCount, pendingCount)
+     ↓
+[Selesai] → SENT / FAILED
 ```
 
-### Flow SCHEDULED
+### Flow FAILED → Investigasi
 
 ```
-[Buat + scheduledAt] → POST /broadcasts → SCHEDULED
-  ↓
-[Menunggu] → Waktu scheduledAt tiba → otomatis SENDING
-  ↓
-Bisa dibatalkan via POST /broadcasts/:id/cancel
+GET /broadcasts/:id/recipients?status=FAILED
+     ↓
+failureType: "VALIDATION"    → data customer tidak lengkap → lengkapi → broadcast ulang
+failureType: "SEND_ERROR"    → teknis (blocked)          → retry / skip
 ```
 
-### Flow PAUSED
+---
 
+## 8. Additional Endpoints
+
+### GET /api/bots/quota
+
+Lihat pemakaian plan saat ini (used/total).
+
+```bash
+curl -H "Authorization: Bearer <jwt>" \
+  http://localhost:3000/api/bots/quota
 ```
-[SENDING] → POST /broadcasts/:id/pause → PAUSED
-  ↓
-POST /broadcasts/:id/resume → SENDING (lanjut kirim)
-  atau
-POST /broadcasts/:id/cancel → FAILED
+
+```json
+{
+  "success": true,
+  "message": "User quota retrieved",
+  "data": {
+    "plan": "STARTER",
+    "products": { "used": 6, "total": 50 },
+    "broadcastsPerMonth": { "used": 3, "total": 50 },
+    "ordersPerMonth": { "used": 30, "total": 200 }
+  }
+}
+```
+
+---
+
+### POST /api/bots/reconnect
+
+Reconnect bot Telegram (restart instance + set webhook ulang). Berguna jika ada perubahan URL/webhook.
+
+```bash
+curl -X POST -H "Authorization: Bearer <jwt>" \
+  http://localhost:3000/api/bots/reconnect
 ```
 
 ---
 
 ## Summary Endpoints
 
+### Broadcast Campaigns
+
 | Method | Path | Deskripsi |
 |--------|------|-----------|
 | `GET` | `/broadcasts` | Daftar broadcast campaign |
-| `POST` | `/broadcasts` | Buat broadcast baru |
+| `POST` | `/broadcasts` | Buat broadcast baru (tanpa template) |
+| `POST` | `/broadcasts/from-template` | Buat broadcast dari template |
 | `POST` | `/broadcasts/preview` | Preview jumlah customer cocok |
 | `GET` | `/broadcasts/:id` | Detail broadcast + progress |
 | `PATCH` | `/broadcasts/:id` | Update broadcast (DRAFT/SCHEDULED) |
 | `DELETE` | `/broadcasts/:id` | Hapus broadcast (DRAFT/SCHEDULED) |
+| `POST` | `/broadcasts/:id/preview-render` | Preview hasil render pesan (1 sample) |
+| `POST` | `/broadcasts/:id/dry-run` | Dry-run validasi (estimasi gagal) |
 | `POST` | `/broadcasts/:id/send` | Mulai kirim broadcast |
 | `POST` | `/broadcasts/:id/pause` | Pause broadcast SENDING |
 | `POST` | `/broadcasts/:id/resume` | Resume broadcast PAUSED |
 | `POST` | `/broadcasts/:id/cancel` | Batalkan broadcast kapan pun |
 | `GET` | `/broadcasts/:id/recipients` | Daftar recipient + filter status |
+
+### Templates
+
+| Method | Path | Deskripsi |
+|--------|------|-----------|
+| `GET` | `/templates` | Daftar template pesan |
+| `POST` | `/templates` | Buat template baru |
+| `GET` | `/templates/:id` | Detail template + preview |
+| `PATCH` | `/templates/:id` | Update template |
+| `DELETE` | `/templates/:id` | Hapus template |
+
+### System
+
+| Method | Path | Deskripsi |
+|--------|------|-----------|
+| `GET` | `/bots/quota` | Lihat pemakaian plan (used/total) |
+| `POST` | `/bots/reconnect` | Reconnect bot Telegram |

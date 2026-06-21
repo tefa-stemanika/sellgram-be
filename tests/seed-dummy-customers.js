@@ -90,7 +90,7 @@ for (let i = 0; i < COUNT; i += batchSize) {
     batch.push({
       userId,
       telegramId,
-      name: names[idx],
+      name: `Dummy ${names[idx]}`,
       username: usernames[idx] || `${names[idx].toLowerCase().replace(/\s/g, '_')}_${j}`,
       hasTelegram: true,
       hasWhatsapp: false,

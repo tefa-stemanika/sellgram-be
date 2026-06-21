@@ -1,7 +1,8 @@
 import prisma from './db.js'
 import { getBotForUser } from './botManager.js'
-import { assertMonthlyBroadcastLimit, incrementMonthlyBroadcastCount, PLAN_LIMITS } from './planLimitService.js'
+import { assertMonthlyBroadcastLimit, incrementMonthlyBroadcastCount } from './planLimitService.js'
 import { redisSet, redisGet, redisDel, redisSadd, redisSmembers, redisExpire } from './redis.js'
+import { renderTemplate, loadMappings, getTemplateContent, dryRunValidation, getSampleCustomer } from './messageRenderer.js'
 
 const ALLOWED_SORT = ['createdAt', 'name', 'status', 'totalCustomers', 'sentCount', 'updatedAt']
 
@@ -117,6 +118,76 @@ export async function createBroadcast(userId, data) {
   return broadcast
 }
 
+export async function createBroadcastFromTemplate(userId, data) {
+  const { name, templateId, channel, filters, scheduledAt, mappings } = data
+  if (!name || !templateId) throw Object.assign(new Error('name dan templateId wajib diisi'), { statusCode: 400 })
+  if (!Array.isArray(mappings) || mappings.length === 0) {
+    throw Object.assign(new Error('mappings wajib diisi'), { statusCode: 400 })
+  }
+
+  const template = await prisma.campaignTemplate.findFirst({
+    where: { id: templateId, userId },
+    select: { id: true, content: true, variableCount: true, variables: true },
+  })
+  if (!template) throw Object.assign(new Error('Template tidak ditemukan'), { statusCode: 404 })
+
+  const mappedIndices = mappings.map((m) => m.variableIndex)
+  for (let i = 1; i <= template.variableCount; i++) {
+    if (!mappedIndices.includes(i)) {
+      throw Object.assign(
+        new Error(`Variabel {{${i}}} belum di-mapping. Semua variabel template harus di-mapping.`),
+        { statusCode: 400 }
+      )
+    }
+  }
+
+  const validSources = ['CUSTOMER_FIELD', 'STATIC_VALUE', 'DERIVED_FIELD']
+  for (const m of mappings) {
+    if (!validSources.includes(m.sourceType)) {
+      throw Object.assign(new Error(`sourceType "${m.sourceType}" tidak dikenal`), { statusCode: 400 })
+    }
+    if (!m.sourceValue) {
+      throw Object.assign(new Error(`sourceValue wajib diisi untuk mapping {{${m.variableIndex}}}`), { statusCode: 400 })
+    }
+  }
+
+  const preview = await previewCustomers(userId, filters)
+  if (preview.total === 0) throw Object.assign(new Error('Tidak ada customer yang cocok dengan filter'), { statusCode: 400 })
+
+  const hasScheduledAt = scheduledAt && new Date(scheduledAt).getTime() > Date.now()
+  const snapshotMessage = template.content
+
+  const broadcast = await prisma.broadcast.create({
+    data: {
+      userId,
+      name,
+      message: snapshotMessage,
+      templateId: template.id,
+      channel: channel || 'TELEGRAM',
+      filters: filters || {},
+      totalCustomers: preview.total,
+      status: hasScheduledAt ? 'SCHEDULED' : 'DRAFT',
+      scheduledAt: hasScheduledAt ? new Date(scheduledAt) : null,
+    },
+  })
+
+  await prisma.broadcastVariableMapping.createMany({
+    data: mappings.map((m) => ({
+      broadcastId: broadcast.id,
+      userId,
+      variableIndex: m.variableIndex,
+      sourceType: m.sourceType,
+      sourceValue: String(m.sourceValue),
+    })),
+  })
+
+  if (hasScheduledAt) {
+    await enqueueBroadcastJobs(broadcast, userId, new Date(scheduledAt))
+  }
+
+  return broadcast
+}
+
 export async function updateBroadcast(broadcastId, userId, data) {
   const broadcast = await prisma.broadcast.findFirst({ where: { id: broadcastId, userId } })
   if (!broadcast) return null
@@ -187,6 +258,35 @@ export async function previewCustomers(userId, filters) {
     prisma.customer.count({ where }),
   ])
   return { customers, total }
+}
+
+export async function previewRender(broadcastId, userId) {
+  const broadcast = await prisma.broadcast.findFirst({ where: { id: broadcastId, userId } })
+  if (!broadcast) return null
+  if (!broadcast.templateId) return { rendered: broadcast.message, errors: [] }
+
+  const template = await prisma.campaignTemplate.findUnique({
+    where: { id: broadcast.templateId },
+    select: { content: true },
+  })
+  if (!template) return { rendered: broadcast.message, errors: ['Template tidak ditemukan'] }
+
+  const customer = await getSampleCustomer(userId, broadcast.filters)
+  if (!customer) return { rendered: template.content, errors: ['Tidak ada sample customer'] }
+
+  const mappings = await loadMappings(broadcastId, userId)
+  if (mappings.length === 0) return { rendered: template.content, errors: ['Belum ada mapping variabel'] }
+
+  return renderTemplate(template.content, mappings, customer, userId, broadcastId)
+}
+
+export async function dryRunBroadcast(broadcastId, userId) {
+  const broadcast = await prisma.broadcast.findFirst({ where: { id: broadcastId, userId } })
+  if (!broadcast) return null
+  if (!broadcast.templateId) return { message: 'Broadcast tidak menggunakan template', totalInvalid: 0 }
+
+  const customerWhere = buildCustomerWhere(userId, broadcast.filters)
+  return dryRunValidation(broadcastId, userId, customerWhere)
 }
 
 export async function startBroadcast(broadcastId, userId) {
@@ -431,9 +531,47 @@ export async function processSingleRecipient(broadcastId, userId, customerId, ch
   let recipientStatus, errorMsg
   let shouldDisableTelegram = false
 
+  let messageToSend = null
+  let validationErrors = []
+
+  const broadcastWithTemplate = await prisma.broadcast.findUnique({
+    where: { id: broadcastId },
+    select: { templateId: true },
+  })
+
+  if (broadcastWithTemplate?.templateId) {
+    const mappings = await loadMappings(broadcastId, userId)
+    const content = await getTemplateContent(broadcastWithTemplate.templateId)
+    if (mappings.length > 0 && content) {
+      const result = await renderTemplate(content, mappings, customer, userId, broadcastId)
+      messageToSend = result.rendered
+      validationErrors = result.errors
+    }
+  }
+
+  if (!messageToSend) {
+    messageToSend = await getBroadcastMessage(broadcastId, userId)
+  }
+
+  if (validationErrors.length > 0) {
+    await prisma.broadcastRecipient.updateMany({
+      where: { broadcastId, customerId },
+      data: {
+        status: 'FAILED',
+        error: validationErrors.join('; '),
+        failureType: 'VALIDATION',
+      },
+    })
+    const failed = validationErrors.length
+    await prisma.broadcast.update({
+      where: { id: broadcastId },
+      data: { failedCount: { increment: 1 } },
+    }).catch(() => {})
+    return { sent: 0, failed: 1 }
+  }
+
   if (channel === 'TELEGRAM' && customer.telegramId) {
-    const msg = await getBroadcastMessage(broadcastId, userId)
-    const result = await sendBroadcastMessage(userId, customer.telegramId, msg)
+    const result = await sendBroadcastMessage(userId, customer.telegramId, messageToSend)
     if (result.success) {
       recipientStatus = 'SENT'
     } else {
@@ -451,6 +589,7 @@ export async function processSingleRecipient(broadcastId, userId, customerId, ch
     data: {
       status: recipientStatus,
       error: errorMsg || null,
+      failureType: recipientStatus === 'FAILED' ? 'SEND_ERROR' : null,
       sentAt: recipientStatus === 'SENT' ? new Date() : null,
     },
   })
