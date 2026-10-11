@@ -3,20 +3,36 @@ import { Redis } from 'ioredis'
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379'
 
 let client = null
+let wasDisconnected = false
 
 export function getRedisClient() {
   if (!client) {
     client = new Redis(REDIS_URL, {
       maxRetriesPerRequest: 3,
       retryStrategy(times) {
-        if (times > 10) return null
-        return Math.min(times * 100, 3000)
+        return Math.min(times * 200, 5000)
       },
       lazyConnect: true,
     })
 
     client.on('error', (err) => {
       console.error('[Redis] error:', err.message)
+    })
+
+    client.on('reconnecting', () => {
+      console.warn('[Redis] reconnecting...')
+    })
+
+    client.on('ready', () => {
+      if (wasDisconnected) {
+        console.log('[Redis] connection restored')
+        wasDisconnected = false
+      }
+    })
+
+    client.on('end', () => {
+      wasDisconnected = true
+      console.error('[Redis] connection ended')
     })
   }
   return client
@@ -134,6 +150,7 @@ export async function redisPing() {
 
 export async function redisQuit() {
   if (client) {
+    client.removeAllListeners()
     await client.quit()
     client = null
   }
