@@ -1,0 +1,231 @@
+flowchart TB
+
+    %% ==================================================================
+    %% ARSITEKTUR LENGKAP telegram-ai-bot — SATU DIAGRAM TERHUBUNG
+    %% Nomor pada edge = urutan alur pemanggilan (call flow)
+    %% ==================================================================
+
+    %% ------------------------------- EKSTERNAL -------------------------------
+    subgraph EXT["SYSTEM EKSTERNAL"]
+        USER_TG["Pengguna Telegram"]
+        ADMIN_TG["Admin Chat Telegram"]
+        WEB["Website Publik +<br/>Portal Customer"]
+        TG_API["Telegram Bot API"]
+        MIDTRANS["Midtrans<br/>Snap + Core API"]
+        LLM["Gemini /<br/>OpenRouter"]
+        SUPPLIER["Supplier API<br/>External (tenant)"]
+    end
+
+    %% ------------------------------- APLIKASI NODE.JS -------------------------------
+    subgraph APP["APLIKASI NODE.JS — Express 5 ESM (src/index.js + src/app.js)"]
+
+        %% ---- Layer HTTP ----
+        subgraph HTTP["LAPISAN HTTP"]
+            HEALTH["GET /health<br/>ping Redis + SELECT 1 DB"]
+            WH_TELEGRAM["POST /api/webhook/telegram/:userId<br/>webhook.controller.handleTelegramWebhook<br/>(publik, verifikasi secret token)"]
+            WH_MIDTRANS["POST /api/webhook/midtrans<br/>webhook.controller.handleMidtransWebhook<br/>(publik, verifikasi HMAC per tenant)"]
+            ROUTE_PUBLIC["publicRouter — rate limit IP<br/>GET /api/public/profile, products<br/>POST /api/public/orders, verify"]
+            ROUTE_PORTAL["customerPortalRoutes — /api/portal/:userId<br/>register, login, me, orders<br/>(JWT customer)"]
+            ROUTE_AUTH["authRoutes — /api/auth<br/>register, login (publik)<br/>logout, me (JWT)"]
+            ROUTE_DUMMY["/api/dummy/supplier/topup<br/>mock supplier (x-supplier-secret)"]
+            ROUTE_BILLING["/api/subscription + /api/invoices<br/>dimount SEBELUM global guard<br/>agar tenant PAST_DUE bisa bayar"]
+            MIDDLEWARE["Middleware global /api:<br/>requireAuth (JWT) →<br/>requireActiveSubscription (planGuard) →<br/>planResource(name) per endpoint"]
+            ROUTE_ADMIN["apiRouter — endpoint admin ter-autentikasi:<br/>bot-config, bot-credentials, bots status/reconnect/quota,<br/>orders, products + stock, dashboard,<br/>fulfillment config, stock-items, slots,<br/>broadcast + template, tickets + labels,<br/>customers, fulfillment-logs"]
+        end
+
+        %% ---- Layer Percakapan Bot ----
+        subgraph CONV["LAPISAN PERCAKAPAN BOT (per tenant)"]
+            BOMAN["botManager.js<br/>activeBots Map + botObservability Map<br/>processTelegramWebhookUpdateForUser<br/>configureTelegramWebhookForUser + retry + reconcile<br/>spawnBotForUser / restartBotForUser / verifySecret"]
+            HANDLERS["handlers/index.js → registerHandlersForUser<br/>messageHandler (mode AI + function calls)<br/>buttonHandler (inline keyboard FSM)<br/>orderHandler (/menu /pesan /konfirmasi /batal /status)"]
+            ADMINBOT["adminBot.js<br/>instance bot admin per tenant<br/>notif order sukses/gagal"]
+        end
+
+        %% ---- Layer Services ----
+        subgraph SVC["LAPISAN SERVICES"]
+            CONFIGSVC["configService.js — load + cache<br/>BotConfig/BotCredential ter-dekripsi<br/>+ tenantResolver.js (token map)"]
+            ENCRYPT["utils/encryption.js<br/>AES-256-GCM iv:tag:ciphertext"]
+            AIPROV["aiProvider.js → gemini.js / openrouter.js<br/>askAI dengan tools show_menu, start_order"]
+            ORDERSVC["order.js (FSM Redis) + orderService.js<br/>+ productService.js + stockService.js<br/>deduct / refund / restock / adjust"]
+            MIDTRANS_SVC["midtrans.js<br/>createSnapTransaction,<br/>checkTransactionStatus,<br/>verifyWebhookSignature HMAC-SHA256"]
+            FULENGINE["fulfillment/fulfillmentEngine.js<br/>enqueueFulfillment per OrderItem"]
+            STRATEGIES["strategi fulfillment:<br/>STOCK_POOL (FOR UPDATE SKIP LOCKED)<br/>SLOT_ASSIGN (Slot + SlotAccount)<br/>API_EXTERNAL (fetch tenant, 15s)<br/>MANUAL (pesan ke admin)"]
+            FULNOTIF["fulfillmentNotifier.js<br/>deliveri ke customer,<br/>alert gagal ke admin"]
+            BCAST["broadcastService.js + templateService.js<br/>+ messageRenderer.js + derivedFieldResolver.js<br/>mapping: CUSTOMER_FIELD / STATIC_VALUE / DERIVED_FIELD"]
+            SUBSVC["subscriptionService.js + invoiceService.js<br/>INV-YYYYMMDD-NNNN, grace period,<br/>activate / cancel / expire"]
+            PLANGUARD["planLimitService.js<br/>PLAN_LIMITS FREE/STARTER/PRO<br/>incrementMonthlyOrderCount / BroadcastCount"]
+            TICKETSVC["ticketService + labelService +<br/>ticketActivityService + fulfillmentService<br/>(log aktivitas fulfillment)"]
+            CUSTOMERSVC["customerService.js +<br/>customerAuthService.js + userService.js"]
+        end
+
+        %% ---- Layer Workers ----
+        subgraph WK["BULLMQ WORKERS (queue via Redis)"]
+            W_NOTIF["telegram-notifications worker (concurrency 5)<br/>payment-success: createTicket + upsertCustomer<br/>+ deductStock + quota++ + enqueueFulfillment<br/>+ notif buyer + admin · payment-failed: refund stock"]
+            W_WEBHOOK["telegram-webhooks worker<br/>setWebhook dengan retry,<br/>failed → scheduleReconcile 10/30/60/120s"]
+            W_FULFILL["fulfillment-jobs worker<br/>dispatch strategi, max 3 attempts,<br/>backoff, tulis FulfillmentLog"]
+            W_BCAST["broadcast-jobs worker (concurrency 3,<br/>limiter 25/s) — kirim per recipient,<br/>delayed jobs utk scheduledAt,<br/>failure rate >20% → auto-pause + alert"]
+            W_SUB["subscription worker — cron 0 1 * * * (08:00 WIB)<br/>check-expiry: ACTIVE → EXPIRED/PAST_DUE + downgrade FREE<br/>send-reminders H-3/H-1 · expirePendingInvoices 24h"]
+        end
+    end
+
+    %% ------------------------------- REDIS -------------------------------
+    subgraph REDIS["REDIS — cache, antrian, lock, state"]
+        R_TMAP["tenant_map:hash → userId (TTL 600s)"]
+        R_TCFG["tenant_config:userId — cache kredensial ter-dekripsi (600s)"]
+        R_QUEUE["webhook_queue:userId:telegramId — FIFO list update"]
+        R_LOCK["webhook_lock:userId:telegramId — SETNX mutex (30s)"]
+        R_SESSION["session:userId:telegramId — history AI max 20 (1800s)"]
+        R_ORDER["order:userId:telegramId — FSM pesanan (3600s)"]
+        R_WELCOME["welcome_sent:userId:chatId — dedup /start (24h)"]
+        R_QUOTA["monthly_orders / monthly_broadcasts:<br/>userId:yyyymm — INCR kuota plan"]
+        R_INVSEQ["invoice_seq:yyyymmdd — penomoran invoice"]
+        R_PLANCACHE["user:userId:plan — cache planGuard (300s)"]
+        R_RATE["ratelimit:ip — sliding window 30 req/menit"]
+        R_BFLAG["broadcast:paused:userId + job-id sets<br/>— flag pause / cancel"]
+        R_BULL["bull:telegram-notifications,<br/>bull:telegram-webhooks,<br/>bull:fulfillment-jobs,<br/>bull:broadcast-jobs"]
+    end
+
+    %% ------------------------------- POSTGRESQL -------------------------------
+    subgraph PG["POSTGRESQL — Prisma (semua tabel FK userId, isolasi tenant)"]
+        T_USER["User — email, passwordHash,<br/>plan FREE/STARTER/PRO, isActive"]
+        T_BOTCFG["BotConfig — mode AI/BUTTON,<br/>midtransIsProduction, isActive"]
+        T_BOTCRED["BotCredential — key/value<br/>terenkripsi AES-256-GCM"]
+        T_PRODUCT["Product — harga, stok,<br/>soft delete deletedAt"]
+        T_ORDER["Order — orderId, source TELEGRAM/WEBSITE,<br/>status, paymentUrl, qrString, midtransOrderId"]
+        T_ORDERITEM["OrderItem — quantity, unitPrice"]
+        T_CUSTOMER["Customer + CustomerAuth<br/>— portal login"]
+        T_STOCK["StockLog + StockItem<br/>(content, AVAILABLE/USED/RESERVED/EXPIRED)"]
+        T_SLOT["SlotAccount + Slot<br/>— assign + release"]
+        T_FULCFG["FulfillmentConfig — tipe,<br/>apiUrl/headers/payload template<br/>kredensial terenkripsi"]
+        T_FULLOG["FulfillmentLog +<br/>TicketFulfillmentLog"]
+        T_TICKET["Ticket + Label + TicketLabel +<br/>TicketComment + TicketActivity"]
+        T_BCAST["Broadcast + BroadcastRecipient +<br/>CampaignTemplate + BroadcastVariableMapping"]
+        T_SUB["Subscription — status ACTIVE/EXPIRED/<br/>CANCELLED/PAST_DUE, gracePeriodEnd"]
+        T_INV["Invoice — invoiceNumber unik,<br/>status PENDING/PAID/EXPIRED/CANCELLED"]
+    end
+
+    %% ==================================================================
+    %% ALUR 1 — UPDATE TELEGRAM MASUK (webhook → queue → handler → balasan)
+    %% ==================================================================
+    USER_TG -->|"1a. kirim pesan / klik tombol"| TG_API
+    TG_API -->|"1b. webhook POST + header x-telegram-bot-api-secret-token"| WH_TELEGRAM
+    WH_TELEGRAM -->|"1c. verifikasi secret = sha256(botToken)"| BOMAN
+    BOMAN -->|"1d. baca token ter-dekripsi"| CONFIGSVC
+    CONFIGSVC -->|"1e. decrypt"| ENCRYPT
+    CONFIGSVC -.->|"cache"| R_TCFG
+    CONFIGSVC --> T_BOTCRED
+    WH_TELEGRAM -->|"1f. LPUSH update + SETNX lock, drain RPOP → processUpdate"| BOMAN
+    BOMAN <-->|"queue + lock per chat"| R_QUEUE
+    BOMAN <--> R_LOCK
+    BOMAN -->|"1g. lazy spawnBotForUser bila bot belum aktif"| HANDLERS
+    HANDLERS -->|"1h. mode AI: kirim prompt + history"| AIPROV
+    AIPROV <--> R_SESSION
+    AIPROV -->|"1i. function calls show_menu / start_order"| LLM
+    HANDLERS -->|"1h2. mode BUTTON: baca/tulis state order"| ORDERSVC
+    ORDERSVC <--> R_ORDER
+    HANDLERS -->|"1j. /start dedup"| R_WELCOME
+    HANDLERS -->|"1k. kirim balasan: teks, keyboard, invoice"| TG_API
+    TG_API -->|"1l. pesan diterima"| USER_TG
+    HANDLERS -->|"1m. query produk & simpan Order"| ORDERSVC
+    ORDERSVC --> T_PRODUCT
+    ORDERSVC --> T_ORDER
+
+    %% ==================================================================
+    %% ALUR 2 — PEMBAYARAN MIDTRANS (order → snap → webhook → worker)
+    %% ==================================================================
+    ORDERSVC -->|"2a. buat transaksi Snap utk order"| MIDTRANS_SVC
+    MIDTRANS_SVC -->|"2b. paymentUrl / qrString dikembalikan ke handler"| TG_API
+    USER_TG -->|"2c. bayar via Snap"| MIDTRANS
+    MIDTRANS -->|"2d. webhook status transaksi"| WH_MIDTRANS
+    WH_MIDTRANS -->|"2e. HMAC verify pakai server key tenant"| MIDTRANS_SVC
+    WH_MIDTRANS -->|"2f. update Order PAID/FAILED by orderId"| T_ORDER
+    WH_MIDTRANS -->|"2g. prefix SUB- → aktivasi langganan"| SUBSVC
+    WH_MIDTRANS -->|"2h. enqueue notif payment-success/failed"| R_BULL
+    R_BULL --> W_NOTIF
+    W_NOTIF -->|"2i. notif pembeli via bot instance"| TG_API
+    W_NOTIF -->|"2j. createTicketFromOrder + upsertCustomer + deductStock + quota"| TICKETSVC
+    W_NOTIF -->|"2k. incrementMonthlyOrderCount"| PLANGUARD
+    PLANGUARD -->|"INCR"| R_QUOTA
+    W_NOTIF -->|"2l. admin notif order sukses"| ADMINBOT
+    ADMINBOT --> TG_API
+    ADMIN_TG -.->|"menerima notif"| TG_API
+    W_NOTIF -->|"2m. enqueueFulfillment(order)"| FULENGINE
+    FULENGINE -->|"2n. job fulfill per item"| R_BULL
+    R_BULL --> W_FULFILL
+    W_FULFILL -->|"2o. dispatch sesuai FulfillmentConfig"| STRATEGIES
+    STRATEGIES -->|"STOCK_POOL / SLOT_ASSIGN"| T_STOCK
+    STRATEGIES --> T_SLOT
+    STRATEGIES -->|"API_EXTERNAL fetch"| SUPPLIER
+    STRATEGIES -.->|"kredensial decrypt"| ENCRYPT
+    STRATEGIES -->|"MANUAL: minta admin proses"| ADMINBOT
+    W_FULFILL -->|"2p. kirim deliveredContent / alert gagal + refund stock (max 3 attempts)"| FULNOTIF
+    FULNOTIF -->|"pesan deliveri"| TG_API
+    W_FULFILL -->|"tulis log + retry"| T_FULLOG
+
+    %% ==================================================================
+    %% ALUR 3 — WEBSITE PUBLIK & PORTAL CUSTOMER
+    %% ==================================================================
+    WEB -->|"3a. lihat katalog"| ROUTE_PUBLIC
+    ROUTE_PUBLIC -->|"3b. sliding window rate limit"| R_RATE
+    ROUTE_PUBLIC -->|"3c. order website → Snap txn"| MIDTRANS_SVC
+    ROUTE_PUBLIC --> T_PRODUCT
+    ROUTE_PUBLIC --> T_ORDER
+    WEB -->|"3d. login/register profil/order"| ROUTE_PORTAL
+    ROUTE_PORTAL --> CUSTOMERSVC
+    CUSTOMERSVC --> T_CUSTOMER
+
+    %% ==================================================================
+    %% ALUR 4 — DASHBOARD ADMIN (JWT + guard subscription + kuota)
+    %% ==================================================================
+    ROUTE_AUTH -->|"4a. login → JWT"| T_USER
+    ROUTE_ADMIN --> MIDDLEWARE
+    ROUTE_BILLING --> MIDDLEWARE
+    MIDDLEWARE -->|"4b. verifikasi JWT"| T_USER
+    MIDDLEWARE -->|"4c. cek status langganan + cache plan"| PLANGUARD
+    PLANGUARD <--> R_PLANCACHE
+    PLANGUARD --> T_SUB
+    MIDDLEWARE -->|"4d. cek limit resource per plan"| PLANGUARD
+    ROUTE_ADMIN -->|"4e. CRUD & query per tenant (isolasi userId)"| SVC
+    ROUTE_ADMIN -->|"4f. reconnect bot: reloadConfig + refreshTenantMap + restart + setWebhook"| BOMAN
+    ROUTE_ADMIN -->|"4g. status bot & quota langsung"| BOMAN
+    SVC --> PG
+    HEALTH -.->|"ping"| R_BULL
+    HEALTH -.->|"SELECT 1"| PG
+
+    %% ==================================================================
+    %% ALUR 5 — BROADCAST CAMPAIGN + TEMPLATE
+    %% ==================================================================
+    ROUTE_ADMIN -->|"5a. CRUD broadcast/template, send/pause/resume/cancel, preview, dry-run"| BCAST
+    BCAST -->|"5b. render variabel dari mapping"| T_BCAST
+    BCAST -->|"5c. filter recipients"| CUSTOMERSVC
+    BCAST -->|"5d. enqueue jobs (immediate / delayed scheduledAt)"| R_BULL
+    R_BULL --> W_BCAST
+    W_BCAST -->|"5e. incrementMonthlyBroadcastCount"| PLANGUARD
+    W_BCAST -->|"5f. kirim pesan per recipient via bot tenant"| TG_API
+    W_BCAST -->|"5g. update status recipient SENT/FAILED"| T_BCAST
+    W_BCAST <-->|"5h. flag pause / cancel + job ids"| R_BFLAG
+    W_BCAST -->|"5i. failure rate >20% → auto-pause + alert"| ADMINBOT
+
+    %% ==================================================================
+    %% ALUR 6 — SUBSCRIPTION / BILLING / QUOTA
+    %% ==================================================================
+    ROUTE_BILLING -->|"6a. upgrade → createInvoice"| SUBSVC
+    SUBSVC -->|"6b. nomor invoice dari sequence"| R_INVSEQ
+    SUBSVC -->|"6c. Snap payment invoice (prefix SUB-)"| MIDTRANS_SVC
+    MIDTRANS_SVC -.->|"redirect ke checkout"| MIDTRANS
+    SUBSVC --> T_INV
+    SUBSVC -->|"6d. webhook PAID → activateSubscription"| T_SUB
+    R_BULL --> W_SUB
+    W_SUB -->|"6e. cron harian: expiry check, downgrade FREE, reminders H-3/H-1, invoice expired"| SUBSVC
+    W_SUB -->|"6f. kirim reminder via bot tenant ke admin chat"| ADMINBOT
+
+    %% ==================================================================
+    %% ALUR 7 — LIFECYCLE BOT & WEBHOOK REGISTRATION
+    %% ==================================================================
+    BOMAN -->|"7a. startup: initializeTenantMap dari semua TELEGRAM_BOT_TOKEN"| CONFIGSVC
+    CONFIGSVC -.->|"populate hash→userId"| R_TMAP
+    BOMAN -->|"7b. setWebhook URL /api/webhook/telegram/:userId + secret_token, retry 0/1.5/4/9s"| TG_API
+    BOMAN -->|"7c. gagal transient → enqueue + reconcile 10/30/60/120s"| R_BULL
+    R_BULL --> W_WEBHOOK
+    W_WEBHOOK -->|"7d. ulangi configureTelegramWebhookForUser"| TG_API
+    BOMAN -->|"7e. validasi token getMe + simpan config"| T_BOTCFG
+    BOMAN -->|"7f. observability: running, tokenStatus, lastSpawn"| T_BOTCFG

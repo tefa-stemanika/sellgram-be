@@ -1,0 +1,43 @@
+flowchart TB
+
+    %% ==========================================================
+    %% ARSITEKTUR RINGKAS telegram-ai-bot (versi sederhana
+    %% dari docs/architecture.mmd — 2 tingkat lebih abstrak)
+    %% ==========================================================
+
+    USER_TG["Pengguna Telegram"]
+    ADMIN["Admin Tenant<br/>(dashboard + chat admin)"]
+    TG_API["Telegram Bot API"]
+    MIDTRANS["Midtrans"]
+    AI["Gemini / OpenRouter"]
+    SUPPLIER["API Supplier External"]
+
+    subgraph APP["Aplikasi Multi-Tenant (Node.js + Express)"]
+        direction TB
+        API["REST API<br/>auth JWT, dashboard admin,<br/>website publik, portal customer"]
+        BOT["Bot Engine per Tenant<br/>webhook → handler AI / button<br/>order flow"]
+        SVC["Bisnis Services<br/>produk-stok, pembayaran, fulfillment,<br/>broadcast, langganan, ticket"]
+        WORKER["Background Workers<br/>notif payment, fulfillment,<br/>broadcast, cron langganan"]
+    end
+
+    PG[("PostgreSQL<br/>data tenant: user, product, order,<br/>customer, broadcast, subscription")]
+    REDIS[("Redis<br/>cache, queue/lock, state order & session,<br/>BullMQ, kuota bulanan")]
+
+    %% ---- Alur utama ----
+    USER_TG <-->|"pesan & tombol"| TG_API
+    TG_API <-->|"webhook / kirim pesan"| BOT
+    ADMIN <-->|"kelola tenant"| API
+    ADMIN <-->|"notif order & reminder"| TG_API
+
+    API --> SVC
+    BOT --> SVC
+    SVC --> WORKER
+
+    SVC -->|"kredensial, produk, order, laporan"| PG
+    BOT <-->|"cache config, queue + lock update,<br/>session AI, FSM order"| REDIS
+    WORKER <-->|"antrian BullMQ"| REDIS
+
+    SVC -->|"function call chat"| AI
+    SVC <-->|"Snap transaksi + HMAC webhook"| MIDTRANS
+    MIDTRANS -->|"status pembayaran"| WORKER
+    WORKER -->|"eksekusi fulfillment"| SUPPLIER
