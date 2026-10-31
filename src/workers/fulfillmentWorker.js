@@ -17,7 +17,7 @@ export function createFulfillmentWorker(connection) {
   const worker = new Worker(
     'fulfillment-jobs',
     async (job) => {
-      const { orderId, userId, productId, orderOrderId, telegramId, source } = job.data
+      const { orderId, userId, productId } = job.data
 
       const order = await prisma.order.findFirst({
         where: { id: orderId, userId },

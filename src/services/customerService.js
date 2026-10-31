@@ -91,7 +91,7 @@ export async function getCustomers(userId, filters = {}) {
     'name',
   ]
   const ALLOWED_SOURCE = ['ORDER', 'MANUAL', 'IMPORT']
-  const ALLOWED_ORDER_SOURCE = ['TELEGRAM', 'WEBSITE', 'API']
+  const ALLOWED_ORDER_SOURCE = ['TELEGRAM', 'WHATSAPP', 'WEBSITE', 'API']
   const safeSortBy = ALLOWED_SORT.includes(sortBy) ? sortBy : 'createdAt'
   const safeSortDir = sortDir === 'asc' ? 'asc' : 'desc'
   const safeSource = ALLOWED_SOURCE.includes(source) ? source : undefined

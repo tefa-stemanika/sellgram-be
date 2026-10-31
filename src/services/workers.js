@@ -8,6 +8,7 @@ import { createTicketFulfillmentLog } from './fulfillmentService.js'
 import { enqueueFulfillment } from './fulfillment/fulfillmentEngine.js'
 import { createFulfillmentWorker } from '../workers/fulfillmentWorker.js'
 import { incrementMonthlyOrderCount } from './planLimitService.js'
+import { sendWhatsAppTextForUser } from './whatsappManager.js'
 import prisma from './db.js'
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379'
@@ -16,6 +17,12 @@ const connection = { url: REDIS_URL }
 let notifWorker = null
 let webhookWorker = null
 let fulfillmentWorker = null
+
+function resolveWhatsAppTarget(order) {
+  if (order.whatsappId) return order.whatsappId
+  const phone = String(order.customerPhone || '').replace(/\D/g, '')
+  return phone || null
+}
 
 export function startWorkers() {
   if (notifWorker || webhookWorker) {
@@ -27,8 +34,11 @@ export function startWorkers() {
     const { data } = job
 
     const order = await prisma.order.findFirst({
-      where: { orderId: data.orderId },
-      include: { orderItems: { include: { product: true } } },
+      where: { orderId: data.orderId, userId: data.userId },
+      include: {
+        orderItems: { include: { product: true } },
+        customer: { select: { name: true, phone: true, email: true } },
+      },
     })
 
     if (!order) {
@@ -39,15 +49,40 @@ export function startWorkers() {
     const bot = getBotForUser(data.userId)
 
     if (job.name === 'payment-success') {
-      if (bot && order.source !== 'WEBSITE') {
-        const telegramId = Number(order.telegramId)
-        const item = order.orderItems?.[0]
-        const text = `✅ *Pembayaran Berhasil!*\n\n🔖 Order: \`${order.orderId}\`\n${item ? `${item.product.emoji} ${item.product.name} x${item.quantity}` : ''}\n💵 Total: Rp ${order.totalPrice.toLocaleString('id-ID')}\n\nTerima kasih! Pesananmu sedang kami proses. 🙏`
+      const item = order.orderItems?.[0]
+      const itemLabel = item
+        ? `${item.product.emoji || '🛍️'} ${item.product.name} x${item.quantity}`
+        : ''
 
-        try {
-          await bot.sendMessage(telegramId, text, { parse_mode: 'Markdown' })
-        } catch (err) {
-          console.error('[Worker] Gagal kirim notif user:', err.message)
+      if (order.source === 'WHATSAPP') {
+        const whatsappTarget = resolveWhatsAppTarget(order)
+        if (whatsappTarget) {
+          const text = `✅ *Pembayaran Berhasil!*\n\n🔖 Order: ${order.orderId}\n${itemLabel}\n💵 Total: Rp ${order.totalPrice.toLocaleString('id-ID')}\n\nTerima kasih! Pesananmu sedang kami proses. 🙏`
+
+          try {
+            await sendWhatsAppTextForUser(data.userId, whatsappTarget, text)
+          } catch (err) {
+            console.error('[Worker] Gagal kirim notif WhatsApp user:', err.message)
+          }
+        } else {
+          console.warn(
+            `[Worker] Order WhatsApp ${order.orderId} tidak punya whatsappId/customerPhone, notifikasi pembeli dilewati`,
+          )
+        }
+      } else if (bot && order.source !== 'WEBSITE') {
+        const telegramId = order.telegramId ? Number(order.telegramId) : null
+        if (!telegramId) {
+          console.warn(
+            `[Worker] Order ${order.orderId} tanpa telegramId, notifikasi pembeli dilewati`,
+          )
+        } else {
+          const text = `✅ *Pembayaran Berhasil!*\n\n🔖 Order: \`${order.orderId}\`\n${itemLabel}\n💵 Total: Rp ${order.totalPrice.toLocaleString('id-ID')}\n\nTerima kasih! Pesananmu sedang kami proses. 🙏`
+
+          try {
+            await bot.sendMessage(telegramId, text, { parse_mode: 'Markdown' })
+          } catch (err) {
+            console.error('[Worker] Gagal kirim notif user:', err.message)
+          }
         }
       }
 
@@ -84,14 +119,35 @@ export function startWorkers() {
         }).catch(err => console.error('[Worker] Gagal log fulfillment:', err.message))
       }
     } else if (job.name === 'payment-failed') {
-      if (bot && order.source !== 'WEBSITE') {
-        const telegramId = Number(order.telegramId)
-        const text = `❌ *Pembayaran Gagal/Expired*\n\n🔖 Order: \`${order.orderId}\`\n\nPembayaran tidak berhasil atau sudah kadaluarsa.\nKetik /pesan untuk membuat order baru.`
+      if (order.source === 'WHATSAPP') {
+        const whatsappTarget = resolveWhatsAppTarget(order)
+        if (whatsappTarget) {
+          const text = `❌ *Pembayaran Gagal/Expired*\n\n🔖 Order: ${order.orderId}\n\nPembayaran tidak berhasil atau sudah kadaluarsa.\nKetik /pesan untuk membuat order baru.`
 
-        try {
-          await bot.sendMessage(telegramId, text, { parse_mode: 'Markdown' })
-        } catch (err) {
-          console.error('[Worker] Gagal kirim notif gagal user:', err.message)
+          try {
+            await sendWhatsAppTextForUser(data.userId, whatsappTarget, text)
+          } catch (err) {
+            console.error('[Worker] Gagal kirim notif gagal WhatsApp user:', err.message)
+          }
+        } else {
+          console.warn(
+            `[Worker] Order WhatsApp ${order.orderId} tidak punya whatsappId/customerPhone, notifikasi pembeli dilewati`,
+          )
+        }
+      } else if (bot && order.source !== 'WEBSITE') {
+        const telegramId = order.telegramId ? Number(order.telegramId) : null
+        if (!telegramId) {
+          console.warn(
+            `[Worker] Order ${order.orderId} tanpa telegramId, notifikasi pembeli dilewati`,
+          )
+        } else {
+          const text = `❌ *Pembayaran Gagal/Expired*\n\n🔖 Order: \`${order.orderId}\`\n\nPembayaran tidak berhasil atau sudah kadaluarsa.\nKetik /pesan untuk membuat order baru.`
+
+          try {
+            await bot.sendMessage(telegramId, text, { parse_mode: 'Markdown' })
+          } catch (err) {
+            console.error('[Worker] Gagal kirim notif gagal user:', err.message)
+          }
         }
       }
 

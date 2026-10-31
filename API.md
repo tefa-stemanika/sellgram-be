@@ -311,6 +311,133 @@ curl -X GET "http://localhost:3000/api/bots/health?refresh=true" \
 
 Monitor background berjalan tiap `BOT_HEALTH_MONITOR_INTERVAL_MS` (default 5 menit, `<= 0` untuk mematikan) dan mencatat peringatan `[BotHealth]` di log saat status bot berubah.
 
+### GET /api/bots/whatsapp/status
+
+Cek status instance WhatsApp di Evolution API dan konfigurasi webhook-nya. Membutuhkan credential `EVOLUTION_API_URL` dan `EVOLUTION_API_KEY` (per tenant atau fallback env). Nama instance selalu diturunkan backend dari `userId` (`tenant-<userId tanpa tanda baca>`) dan tidak dapat diatur lewat env maupun client.
+
+```bash
+curl -X GET http://localhost:3000/api/bots/whatsapp/status \
+  -H "Authorization: Bearer <token>"
+```
+
+```json
+{
+  "success": true,
+  "message": "Get WhatsApp status success",
+  "data": {
+    "userId": "uuid",
+    "configured": true,
+    "instance": "tenant-<uuid-tanpa-dash>",
+    "instanceExists": true,
+    "needsCreate": false,
+    "instanceLimit": 1,
+    "apiUrl": "https://evolution.example.com",
+    "state": "open",
+    "connected": true,
+    "webhook": {
+      "url": "https://app.example.com/api/webhook/whatsapp/uuid",
+      "enabled": true,
+      "events": ["MESSAGES_UPSERT"],
+      "expectedUrl": "https://app.example.com/api/webhook/whatsapp/uuid",
+      "synced": true
+    },
+    "errors": []
+  }
+}
+```
+
+`instance` selalu turunan `userId` dan dikelola backend — tenant tidak bisa mengganti nama instance. `instanceExists: false` / `needsCreate: true` berarti instance belum ada di server Evolution — panggil endpoint create instance. `webhook.synced: false` berarti webhook belum menunjuk ke endpoint tenant; panggil create/connect/restart untuk menyinkronkannya. `instanceLimit` selalu `1` (satu instance per user).
+
+### POST /api/bots/whatsapp/instance
+
+Membuat instance Evolution milik tenant (idempotent — instance yang sudah ada tidak dibuat ulang). Nama instance deterministik dan dikelola backend: `tenant-<userId tanpa tanda baca>`; nilainya tidak disimpan sebagai credential dan tidak dapat diatur tenant. Maksimal **1 instance per user**; bila terdeteksi lebih dari satu, endpoint mengembalikan `409 instance_limit_reached`.
+
+Webhook otomatis dipasang setelah instance berhasil dibuat/ditemukan, dengan URL berdasarkan userId: `${PUBLIC_BASE_URL}/api/webhook/whatsapp/:userId`, header `x-evolution-webhook-secret`, dan event `MESSAGES_UPSERT`. Bila webhook sudah sesuai, `/webhook/set` tidak dipanggil ulang (`action: "unchanged"`).
+
+```bash
+curl -X POST http://localhost:3000/api/bots/whatsapp/instance \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "number": "6281234567890" }'
+```
+
+Body opsional. `number` (8-15 digit) membuat Evolution menampilkan pairing code sebagai alternatif scan QR.
+
+```json
+{
+  "success": true,
+  "message": "Instance WhatsApp berhasil dibuat",
+  "data": {
+    "userId": "uuid",
+    "created": true,
+    "instance": "tenant-<uuid-tanpa-dash>",
+    "instanceLimit": 1,
+    "apiUrl": "https://evolution.example.com",
+    "state": "connecting",
+    "connected": false,
+    "qr": { "base64": "data:image/png;base64,...", "code": "2@...", "pairingCode": null, "count": 1 },
+    "webhook": {
+      "success": true,
+      "action": "created",
+      "webhookUrl": "https://app.example.com/api/webhook/whatsapp/uuid",
+      "events": ["MESSAGES_UPSERT"]
+    }
+  }
+}
+```
+
+`webhook.action`: `created` | `updated` | `unchanged`. Status HTTP `201` saat instance baru dibuat, `200` saat sudah ada.
+
+### GET /api/bots/whatsapp/connect
+
+Ambil QR / pairing code untuk menghubungkan WhatsApp seperti WhatsApp Web. Response Evolution dinormalisasi ke field `base64`, `code`, `pairingCode`, dan `count`. Webhook tenant juga dipastikan terpasang (idempotent) saat connect.
+
+```bash
+curl -X GET "http://localhost:3000/api/bots/whatsapp/connect?number=6281234567890" \
+  -H "Authorization: Bearer <token>"
+```
+
+Query `number` opsional. Bila instance sudah terhubung (`state: "open"`), QR tidak dikembalikan.
+
+```json
+{
+  "success": true,
+  "message": "QR WhatsApp berhasil dibuat, silakan scan",
+  "data": {
+    "userId": "uuid",
+    "instance": "tenant-<uuid-tanpa-dash>",
+    "state": "connecting",
+    "connected": false,
+    "base64": "data:image/png;base64,...",
+    "code": "2@...",
+    "pairingCode": null,
+    "count": 1,
+    "webhook": {
+      "success": true,
+      "action": "unchanged",
+      "webhookUrl": "https://app.example.com/api/webhook/whatsapp/uuid"
+    }
+  }
+}
+```
+
+Kode error: `instance_missing` (404 — panggil create instance dulu), `invalid_number` (400), `connect_failed` (502/503).
+
+### POST /api/bots/whatsapp/restart
+
+Restart instance Evolution, paksa set ulang webhook ke `PUBLIC_BASE_URL`, lalu kembalikan status terbaru. Gunakan bila instance bermasalah, QR tidak muncul, atau webhook perlu disinkronkan ulang. `POST /api/bots/whatsapp/reconnect` tetap tersedia sebagai alias endpoint ini.
+
+```bash
+curl -X POST http://localhost:3000/api/bots/whatsapp/restart \
+  -H "Authorization: Bearer <token>"
+```
+
+Response berisi `restarted`, `restartError`, `webhookUrl`, `webhook` (dengan `action: "updated"`), dan objek `status` (bentuk sama dengan GET status).
+
+Webhook WhatsApp: `POST /api/webhook/whatsapp/:userId` (tanpa JWT, wajib header `x-evolution-webhook-secret`). Hanya event `messages.upsert` yang diproses.
+
+Jika `key.remoteJid` berakhiran `@lid`, backend memetakan ke nomor telepon lewat `key.remoteJidAlt`/`key.senderPn`/`key.participantAlt` (tersedia di Evolution >= 2.3.x). Untuk Evolution 2.2.x yang belum mengirim field tersebut, backend memakai fallback kontak dengan `profilePicUrl` identik dan kandidat tunggal; balasan selalu dikirim ke JID telepon bila pemetaan berhasil. Pemetaan di-cache di Redis (`whatsapp_lid:{userId}:{lid}`).
+
 ---
 
 ## Public API (No Auth)

@@ -9,6 +9,8 @@ import {
   processTelegramWebhookUpdateForUser,
   verifyTelegramWebhookSecretForUser,
 } from '../../services/botManager.js'
+import { verifyEvolutionWebhookSecret } from '../../services/evolution.js'
+import { processEvolutionWebhookForUser } from '../../services/whatsappManager.js'
 import { activateSubscription } from '../../services/subscriptionService.js'
 
 export async function handleMidtransWebhook(req, res, next) {
@@ -128,6 +130,42 @@ export async function handleTelegramWebhook(req, res, next) {
     }
 
     return res.status(200).json({ ok: true })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+export async function handleWhatsAppWebhook(req, res, next) {
+  try {
+    console.log("[Webhook] Update WhatsApp diterima", { body: JSON.stringify(req.body, null, 2) })
+    const userId = String(req.params.userId || '').trim()
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'Invalid userId' })
+    }
+
+    const secret = req.headers['x-evolution-webhook-secret']
+    if (!verifyEvolutionWebhookSecret(userId, secret)) {
+      return res.status(403).json({ success: false, message: 'Forbidden' })
+    }
+
+    if (!req.body || typeof req.body !== 'object') {
+      return res.status(400).json({ success: false, message: 'Invalid payload' })
+    }
+
+    console.log(
+      `[Webhook] Evolution event=${req.body.event} instance=${req.body.instance} user=${userId}`,
+    )
+
+    // ACK cepat agar Evolution tidak retry; pemrosesan dilakukan async.
+    res.status(200).json({ ok: true })
+
+    processEvolutionWebhookForUser(userId, req.body).catch((error) => {
+      console.error(
+        `[Webhook] Gagal proses WhatsApp user=${userId}: ${error.message}`,
+      )
+    })
+
+    return
   } catch (error) {
     return next(error)
   }

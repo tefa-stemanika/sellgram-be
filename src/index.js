@@ -33,6 +33,10 @@ if (activeUserIds.length > 0) {
 
 startWorkers()
 
+// Sinkronkan webhook Evolution API untuk WhatsApp (per tenant).
+import { initializeWhatsAppWebhooksForActiveUsers } from './services/whatsappManager.js'
+await initializeWhatsAppWebhooksForActiveUsers(process.env.PUBLIC_BASE_URL)
+
 // Initialize subscription worker
 const subscriptionWorker = createSubscriptionWorker()
 await scheduleSubscriptionJobs()
@@ -49,6 +53,9 @@ const server = app.listen(port, () => {
   console.log(`   Health check: http://localhost:${port}/api/health`)
   console.log(
     `   Endpoint Midtrans: http://localhost:${port}/api/webhook/midtrans`,
+  )
+  console.log(
+    `   Endpoint WhatsApp: http://localhost:${port}/api/webhook/whatsapp/:userId`,
   )
 })
 

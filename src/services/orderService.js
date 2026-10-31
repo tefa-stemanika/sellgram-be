@@ -13,6 +13,7 @@ export function generateOrderId() {
  * Simpan order baru ke database dengan status PAYMENT_PENDING.
  * paymentUrl dan qrString diisi setelah transaksi Midtrans dibuat.
  * Untuk order dari website (source=WEBSITE), telegramId bersifat opsional.
+ * Untuk order WhatsApp (source=WHATSAPP), whatsappId berisi JID/nomor tujuan.
  */
 export async function saveOrder({
   userId,
@@ -24,6 +25,7 @@ export async function saveOrder({
   source = 'TELEGRAM',
   customerName,
   customerPhone,
+  whatsappId,
 }) {
   const orderId = generateOrderId()
   const totalPrice = product.price * quantity
@@ -34,6 +36,7 @@ export async function saveOrder({
       orderId,
       source,
       telegramId: telegramId ? BigInt(telegramId) : null,
+      whatsappId: whatsappId || null,
       username: username || null,
       firstName: firstName || null,
       customerName: customerName || null,

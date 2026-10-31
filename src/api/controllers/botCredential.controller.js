@@ -13,6 +13,7 @@ import {
   stopBotForUser,
 } from '../../services/botManager.js'
 import { initAdminBotForUser } from '../../services/adminBot.js'
+import { configureWhatsAppWebhookForUser } from '../../services/whatsappManager.js'
 import { ok, fail } from '../utils/response.js'
 
 function maskCredential(encryptedValue) {
@@ -85,6 +86,19 @@ async function refreshRuntimeIfNeeded(userId, key, req) {
     await initAdminBotForUser(userId)
   }
 
+  if (normalizedKey.startsWith('EVOLUTION_')) {
+    const publicBaseUrl =
+      String(process.env.PUBLIC_BASE_URL || '').trim() || getPublicBaseUrl(req)
+    if (publicBaseUrl) {
+      const result = await configureWhatsAppWebhookForUser(userId, publicBaseUrl)
+      if (!result.success) {
+        console.warn(
+          `[BotCredential] Gagal set WhatsApp webhook user=${userId}: ${result.reason}`,
+        )
+      }
+    }
+  }
+
   // Tetap sinkronkan bot utama pada perubahan credential apa pun.
   // Ini membuat flow register -> set config -> set credentials tetap jalan
   // meskipun urutan key dari frontend berubah.
@@ -93,7 +107,7 @@ async function refreshRuntimeIfNeeded(userId, key, req) {
   }
 }
 
-async function handleCredentialDeleteRuntime(userId, key) {
+async function handleCredentialDeleteRuntime(userId, key, req) {
   await reloadConfigForUser(userId)
   const normalizedKey = normalizeCredentialKey(key)
 
@@ -110,6 +124,19 @@ async function handleCredentialDeleteRuntime(userId, key) {
     normalizedKey === 'ADMIN_CHAT_ID'
   ) {
     await initAdminBotForUser(userId)
+  }
+
+  if (normalizedKey.startsWith('EVOLUTION_')) {
+    const publicBaseUrl =
+      String(process.env.PUBLIC_BASE_URL || '').trim() || getPublicBaseUrl(req)
+    if (publicBaseUrl) {
+      const result = await configureWhatsAppWebhookForUser(userId, publicBaseUrl)
+      if (!result.success) {
+        console.warn(
+          `[BotCredential] Gagal set WhatsApp webhook user=${userId}: ${result.reason}`,
+        )
+      }
+    }
   }
 }
 
@@ -203,7 +230,7 @@ export async function deleteBotCredential(req, res, next) {
     }
 
     await prisma.botCredential.delete({ where: { id } })
-    await handleCredentialDeleteRuntime(userId, existing.key)
+    await handleCredentialDeleteRuntime(userId, existing.key, req)
 
     return ok(res, null, 'Delete bot credential success')
   } catch (error) {

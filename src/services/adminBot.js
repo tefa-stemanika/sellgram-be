@@ -116,9 +116,7 @@ ${
 💵 *Total: ${formatRupiah(order.totalPrice)}*
 ━━━━━━━━━━━━━━━━━━━━
 👤 *Data Pembeli*
-Nama: ${order.firstName || '-'}
-Username: ${order.username ? `@${order.username}` : '-'}
-Telegram ID: \`${order.telegramId}\`
+${buildBuyerIdentity(order)}
 ━━━━━━━━━━━━━━━━━━━━
 
 Segera proses pesanan ini! 🚀`
@@ -161,7 +159,7 @@ export async function notifyAdminOrderFailedForUser(userId, order) {
 🔖 Order: \`${order.orderId}\`
 ${item ? `${item.product.emoji} ${item.product.name} x${item.quantity}` : ''}
 💵 Total: ${formatRupiah(order.totalPrice)}
-👤 ${order.firstName || '-'} ${order.username ? `(@${order.username})` : ''}
+👤 ${buildBuyerLabel(order)}
 
 Tidak perlu diproses.`
 
@@ -205,6 +203,56 @@ export async function sendAdminBotMessage(userId, text) {
   } catch (err) {
     console.error(`[AdminBot] Gagal kirim message (user ${userId}):`, err.message)
   }
+}
+
+function resolveBuyerPhone(order) {
+  const direct = String(order.customerPhone || '').replace(/\D/g, '')
+  if (direct) return direct
+  const jid = String(order.whatsappId || '')
+  if (!jid.endsWith('@s.whatsapp.net')) return null
+  return jid.split('@')[0].replace(/\D/g, '') || null
+}
+
+function formatBuyerPhone(phone) {
+  return phone ? `+${phone}` : '-'
+}
+
+function buyerName(order) {
+  return order.customerName || order.firstName || order.customer?.name || '-'
+}
+
+/**
+ * Identitas pembeli mengikuti kanal order: order Telegram punya Telegram ID,
+ * order WhatsApp/Website ditampilkan dengan nomor HP agar tidak muncul "null".
+ */
+export function buildBuyerIdentity(order) {
+  if (order.source === 'TELEGRAM') {
+    return [
+      `Nama: ${buyerName(order)}`,
+      `Username: ${order.username ? `@${order.username}` : '-'}`,
+      `Telegram ID: \`${order.telegramId ?? '-'}\``,
+    ].join('\n')
+  }
+
+  const channel = order.source === 'WHATSAPP' ? 'WhatsApp' : 'Website'
+  const lines = [
+    `Nama: ${buyerName(order)}`,
+    `Sumber: ${channel}`,
+    `No. HP: ${formatBuyerPhone(resolveBuyerPhone(order))}`,
+  ]
+  if (order.username) lines.push(`Username: @${order.username}`)
+  if (order.customer?.email) lines.push(`Email: ${order.customer.email}`)
+  return lines.join('\n')
+}
+
+export function buildBuyerLabel(order) {
+  const name = buyerName(order)
+  if (order.source === 'TELEGRAM') {
+    return `${name} ${order.username ? `(@${order.username})` : ''}`.trim()
+  }
+  const channel = order.source === 'WHATSAPP' ? 'WhatsApp' : 'Website'
+  const phone = resolveBuyerPhone(order)
+  return `${name} (${channel}${phone ? ` ${formatBuyerPhone(phone)}` : ''})`
 }
 
 function formatPaymentMethod(paymentType) {

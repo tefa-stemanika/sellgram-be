@@ -16,7 +16,7 @@ export async function createTicketFromOrder(order, userId) {
       source: 'ORDER',
       status: 'OPEN',
       customerName: order.customerName ?? null,
-      customerContact: order.telegramId ? String(order.telegramId) : (order.customerPhone ?? null),
+      customerContact: resolveCustomerContact(order),
     },
   })
 
@@ -199,6 +199,12 @@ export async function deleteComment(commentId, userId) {
   return prisma.ticketComment.delete({ where: { id: commentId } })
 }
 
+function resolveCustomerContact(order) {
+  if (order.telegramId) return String(order.telegramId)
+  if (order.customerPhone) return order.customerPhone
+  return order.whatsappId ?? null
+}
+
 function buildOrderDescription(order) {
   const lines = [
     `Order ID: ${order.orderId}`,
@@ -207,5 +213,8 @@ function buildOrderDescription(order) {
   ]
   if (order.telegramId) lines.push(`Telegram ID: ${order.telegramId}`)
   if (order.customerPhone) lines.push(`Phone: ${order.customerPhone}`)
+  if (order.whatsappId && order.whatsappId !== order.customerPhone) {
+    lines.push(`WhatsApp JID: ${order.whatsappId}`)
+  }
   return lines.join('\n')
 }
