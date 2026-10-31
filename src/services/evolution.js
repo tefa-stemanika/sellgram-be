@@ -107,15 +107,32 @@ export async function getWhatsAppClientForUser(userId) {
   return { client: createEvolutionClient(config), config }
 }
 
+const SENSITIVE_KEY_PATTERN = /(apikey|secret|token|password|authorization)/i
+
+// Pesan error Evolution ikut ditulis ke log; body-nya bisa mengandung apikey
+// atau secret webhook, jadi nilai key sensitif disamarkan sebelum di-serialize.
+function safeErrorDump(data) {
+  try {
+    return JSON.stringify(data, (key, value) =>
+      SENSITIVE_KEY_PATTERN.test(key) ? '[redacted]' : value,
+    ).slice(0, 500)
+  } catch {
+    return String(data).slice(0, 500)
+  }
+}
+
 function extractErrorMessage(data, status) {
   if (!data) return `HTTP ${status}`
   if (typeof data === 'string') return data.slice(0, 500)
-  return (
+
+  const candidate =
     data.message ||
-    data.error ||
     data.response?.message ||
-    JSON.stringify(data).slice(0, 500)
-  )
+    (typeof data.error === 'string' ? data.error : null) ||
+    (typeof data.response?.error === 'string' ? data.response.error : null) ||
+    safeErrorDump(data)
+
+  return String(candidate).slice(0, 500)
 }
 
 /**
@@ -166,7 +183,12 @@ export function createEvolutionClient(config, options = {}) {
         )
       }
 
-      if (data && typeof data === 'object' && data.error) {
+      // Sebagian endpoint Evolution membalas 200 dengan body error.
+      if (
+        data &&
+        typeof data === 'object' &&
+        (data.error || data.response?.error)
+      ) {
         throw new EvolutionApiError(
           `Evolution API ${method} ${path} gagal: ${extractErrorMessage(data, response.status)}`,
           { status: response.status, body: data },
@@ -198,7 +220,6 @@ export function createEvolutionClient(config, options = {}) {
       }
 
       return request('POST', '/instance/create', {
-        instanceName,
         integration: 'WHATSAPP-BAILEYS',
         qrcode: true,
         ...payload,

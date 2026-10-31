@@ -152,6 +152,8 @@ function whatsAppErrorStatus(result) {
     case 'server_unreachable':
     case 'create_failed':
     case 'connect_failed':
+    case 'restart_failed':
+    case 'webhook_failed':
       return result.transient ? 503 : 502
     default:
       return 400

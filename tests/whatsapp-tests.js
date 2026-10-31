@@ -2,12 +2,25 @@
 // Unit test helper WhatsApp (tanpa memanggil Evolution API).
 
 import 'dotenv/config'
+import crypto from 'node:crypto'
 import {
   extractWhatsAppMessage,
   buildProductListText,
+  parseCommand,
+} from '../src/handlers/whatsappHandler.js'
+import {
   extractPhoneFromJid,
   normalizeWhatsAppJid,
-} from '../src/handlers/whatsappHandler.js'
+  normalizePhoneJid,
+  maskChatId,
+} from '../src/services/whatsappJid.js'
+import { safeEmoji, safePlainText } from '../src/services/safeText.js'
+import { generateOrderId } from '../src/services/orderService.js'
+import { verifySubscriptionWebhookSignature, parseGrossAmount } from '../src/services/midtrans.js'
+import {
+  verifyEvolutionWebhookSecret,
+  buildEvolutionWebhookSecret,
+} from '../src/services/evolution.js'
 import {
   shouldProcessWhatsAppItem,
   buildTenantInstanceName,
@@ -16,6 +29,7 @@ import {
   normalizeInstanceState,
   extractAlternativeJid,
   matchContactByLid,
+  isStaleQueuedMessage,
 } from '../src/services/whatsappManager.js'
 import { assert, assertEqual } from './test-helpers.js'
 import {
@@ -49,8 +63,8 @@ run('extendedTextMessage diekstrak', () => {
   assertEqual(result.text, '/menu', 'text dari extendedTextMessage')
 })
 
-run('listResponseMessage menghasilkan selection', () => {
-  const result = extractWhatsAppMessage({
+run('pesan interaktif lama tidak lagi menghasilkan selection', () => {
+  const list = extractWhatsAppMessage({
     message: {
       listResponseMessage: {
         title: 'Menu Produk',
@@ -58,12 +72,9 @@ run('listResponseMessage menghasilkan selection', () => {
       },
     },
   })
-  assertEqual(result.kind, 'selection', 'kind selection')
-  assertEqual(result.id, 'product:abc-123', 'rowId dipakai sebagai id')
-})
+  assertEqual(list, null, 'listReply diabaikan')
 
-run('buttonsResponseMessage menghasilkan selection', () => {
-  const result = extractWhatsAppMessage({
+  const button = extractWhatsAppMessage({
     message: {
       buttonsResponseMessage: {
         selectedButtonId: 'confirm',
@@ -71,8 +82,76 @@ run('buttonsResponseMessage menghasilkan selection', () => {
       },
     },
   })
-  assertEqual(result.id, 'confirm', 'button id')
-  assertEqual(result.text, 'Konfirmasi', 'display text')
+  assertEqual(button, null, 'buttonReply diabaikan')
+})
+
+run('editedMessage dan viewOnceMessageV2 dibuka wrapper-nya', () => {
+  const edited = extractWhatsAppMessage({
+    message: {
+      editedMessage: {
+        message: {
+          conversationText: null,
+          extendedTextMessage: { text: 'diedit jadi ini' },
+        },
+      },
+    },
+  })
+  assertEqual(edited?.text, 'diedit jadi ini', 'editedMessage unwrap')
+
+  const viewOnce = extractWhatsAppMessage({
+    message: {
+      viewOnceMessageV2: {
+        message: { ephemeralMessage: { message: { conversation: 'sekali lihat' } } },
+      },
+    },
+  })
+  assertEqual(viewOnce?.text, 'sekali lihat', 'wrapper bersarang unwrap')
+})
+
+run('perintah uang/session-wipe hanya jalan dengan slash', () => {
+  assertEqual(parseCommand('/konfirmasi'), 'confirm', 'slash konfirmasi')
+  assertEqual(parseCommand('konfirmasi'), null, 'tanpa slash ditolak')
+  assertEqual(parseCommand('bayar'), null, 'kata bayar tidak memicu pembayaran')
+  assertEqual(parseCommand('reset'), null, 'tanpa slash reset ditolak')
+  assertEqual(parseCommand('/reset'), 'reset', 'slash reset diterima')
+  assertEqual(parseCommand('/batal'), 'cancel', 'slash batal')
+  assertEqual(parseCommand('batal'), 'cancel', 'batal terbuka tanpa slash')
+  assertEqual(parseCommand('menu sekarang'), 'menu', 'command di awal kalimat')
+  assertEqual(parseCommand('  /START  '), 'start', 'case dan spasi diabaikan')
+  assertEqual(parseCommand('mohon reset dulu'), null, 'kalimat biasa bukan perintah')
+  assertEqual(parseCommand(''), null, 'teks kosong null')
+  assertEqual(parseCommand('/'), null, 'slash saja null')
+  assertEqual(parseCommand('1'), null, 'angka bukan perintah')
+})
+
+run('sanitize teks markup untuk pesan Markdown', () => {
+  assertEqual(safePlainText('Kopi *Gunung* _Aceh_'), 'Kopi Gunung Aceh', 'markup dibuang')
+  assertEqual(safePlainText('a\nb'), 'a b', 'newline dipangkas')
+  assertEqual(safePlainText(null, 80, '-'), '-', 'null jadi placeholder')
+  assertEqual(
+    safePlainText('👍'.repeat(60), 10, ''),
+    '👍'.repeat(10),
+    'potong per kode poin, bukan per unit UTF-16',
+  )
+  assertEqual(safeEmoji('🛒'), '🛒', 'emoji utuh')
+  assertEqual(safeEmoji(undefined), '🛍️', 'emoji default')
+  assertEqual(safeEmoji(null, ''), '', 'placeholder kosong')
+})
+
+run('secret webhook Evolution diverifikasi tanpa timing leak', () => {
+  const secret = buildEvolutionWebhookSecret('user-test')
+  if (!secret) {
+    console.log('   (dilewati: ENCRYPTION_KEY/EVOLUTION_WEBHOOK_SECRET tidak diisi)')
+    return
+  }
+  assert(verifyEvolutionWebhookSecret('user-test', secret), 'secret valid diterima')
+  assert(!verifyEvolutionWebhookSecret('user-test', `${secret}x`), 'secret salah ditolak')
+  assert(!verifyEvolutionWebhookSecret('user-test', ''), 'secret kosong ditolak')
+  assert(!verifyEvolutionWebhookSecret('user-test', undefined), 'secret hilang ditolak')
+  assert(
+    !verifyEvolutionWebhookSecret('user-lain', secret),
+    'secret tenant lain ditolak',
+  )
 })
 
 run('ephemeral wrapper + caption media diekstrak', () => {
@@ -141,6 +220,12 @@ run('normalisasi JID device suffix dan ekstraksi nomor', () => {
   )
   assertEqual(extractPhoneFromJid('123456@lid'), null, 'lid bukan nomor telepon')
   assertEqual(extractPhoneFromJid('123-456@g.us'), null, 'grup bukan nomor telepon')
+  assertEqual(
+    normalizePhoneJid('6281234567890:35@s.whatsapp.net'),
+    '6281234567890@s.whatsapp.net',
+    'normalizePhoneJid membuang device suffix',
+  )
+  assertEqual(normalizePhoneJid('6281234567890@lid'), null, 'normalizePhoneJid menolak lid')
 })
 
 run('buildProductListText menampilkan semua produk bernomor', () => {
@@ -377,6 +462,120 @@ run('notifikasi admin order Telegram tetap menampilkan Telegram ID', () => {
     'Andi (@andi)',
     'label ringkas order Telegram',
   )
+})
+
+run('maskChatId menyembunyikan nomor di log', () => {
+  assertEqual(maskChatId('6281234567890@s.whatsapp.net'), '6281…90@s.whatsapp.net', 'nomor disamarkan')
+  assertEqual(
+    maskChatId('6281234567890:35@s.whatsapp.net'),
+    '6281…90@s.whatsapp.net',
+    'device suffix dibuang sebelum disamarkan',
+  )
+  assert(!maskChatId('6281234567890@s.whatsapp.net').includes('45678'), 'digit tengah hilang')
+  assertEqual(maskChatId('239689676136519@lid'), '2396…19@lid', 'LID disamarkan')
+  assertEqual(maskChatId(''), '-', 'kosong placeholder')
+  assertEqual(maskChatId(null), '-', 'null placeholder')
+})
+
+run('isStaleQueuedMessage menangani timestamp detik dan milidetik', () => {
+  const nowSeconds = Math.floor(Date.now() / 1000)
+
+  assertEqual(
+    isStaleQueuedMessage({ messageTimestamp: nowSeconds - 60 }),
+    false,
+    '60 detik lalu masih segar',
+  )
+  assertEqual(
+    isStaleQueuedMessage({ messageTimestamp: nowSeconds - 1000 }),
+    true,
+    '1000 detik lalu basi',
+  )
+  assertEqual(
+    isStaleQueuedMessage({ messageTimestamp: (nowSeconds - 60) * 1000 }),
+    false,
+    'milidetik 60 detik lalu masih segar',
+  )
+  assertEqual(
+    isStaleQueuedMessage({ messageTimestamp: (nowSeconds - 1000) * 1000 }),
+    true,
+    'milidetik 1000 detik lalu basi',
+  )
+  assertEqual(isStaleQueuedMessage({}), false, 'tanpa timestamp tidak dianggap basi')
+  assertEqual(isStaleQueuedMessage(null), false, 'null tidak dianggap basi')
+})
+
+run('generateOrderId cukup entropy untuk lintas tenant', () => {
+  const first = generateOrderId()
+
+  assert(/^ORD-\d{8}-[0-9A-F]{10}$/.test(first), `format ORD-YYYYMMDD-HEX10, dapat ${first}`)
+  assert(first.length <= 30, `muat di VarChar(30), panjang ${first.length}`)
+
+  const ids = new Set()
+  for (let i = 0; i < 500; i += 1) ids.add(generateOrderId())
+  assertEqual(ids.size, 500, '500 order id tanpa duplikat')
+})
+
+run('parseGrossAmount membaca bentuk nominal yang berbeda', () => {
+  assertEqual(parseGrossAmount('25000'), 25000, 'integer polos')
+  assertEqual(parseGrossAmount('25000.00'), 25000, 'desimal Midtrans')
+  assertEqual(parseGrossAmount('25.000'), 25000, 'grouping gaya Indonesia')
+  assertEqual(parseGrossAmount('25.000,50'), 25000.5, 'grouping + desimal koma')
+  assertEqual(parseGrossAmount('1,234,567'), 1234567, 'grouping koma')
+  assertEqual(parseGrossAmount('25000.000'), 25000, 'desimal 3 digit bukan ribuan')
+  assertEqual(parseGrossAmount('1.234'), 1234, 'grouping titik polos')
+  assertEqual(parseGrossAmount('Rp25.000'), 25000, 'prefiks mata uang dibersihkan')
+  assertEqual(Number.isNaN(parseGrossAmount('')), true, 'kosong bukan angka')
+  assertEqual(Number.isNaN(parseGrossAmount(undefined)), true, 'hilang bukan angka')
+})
+
+run('verifikasi signature webhook subscription', () => {
+  const serverKey = 'test-platform-server-key'
+  const previous = process.env.PLATFORM_MIDTRANS_SERVER_KEY
+  process.env.PLATFORM_MIDTRANS_SERVER_KEY = serverKey
+
+  try {
+    const notification = {
+      order_id: 'SUB-INV-0001',
+      status_code: '200',
+      gross_amount: '150000',
+      transaction_status: 'settlement',
+    }
+    const signature = crypto
+      .createHash('sha512')
+      .update(`${notification.order_id}${notification.status_code}${notification.gross_amount}${serverKey}`)
+      .digest('hex')
+
+    assert(
+      verifySubscriptionWebhookSignature({ ...notification, signature_key: signature }),
+      'signature sah diterima',
+    )
+    assert(
+      !verifySubscriptionWebhookSignature({
+        ...notification,
+        signature_key: signature,
+        gross_amount: '1',
+      }),
+      'gross_amount diubah ditolak',
+    )
+    assert(
+      !verifySubscriptionWebhookSignature({ ...notification, signature_key: 'x'.repeat(128) }),
+      'signature salah ditolak',
+    )
+    assert(
+      !verifySubscriptionWebhookSignature({ ...notification, signature_key: null }),
+      'tanpa signature_key ditolak',
+    )
+    assert(!verifySubscriptionWebhookSignature(notification), 'notification tanpa signature ditolak')
+
+    delete process.env.PLATFORM_MIDTRANS_SERVER_KEY
+    assert(
+      !verifySubscriptionWebhookSignature({ ...notification, signature_key: signature }),
+      'key platform belum dikonfigurasi → ditolak (fail closed)',
+    )
+  } finally {
+    if (previous === undefined) delete process.env.PLATFORM_MIDTRANS_SERVER_KEY
+    else process.env.PLATFORM_MIDTRANS_SERVER_KEY = previous
+  }
 })
 
 if (process.exitCode) {

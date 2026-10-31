@@ -7,9 +7,11 @@ import crypto from 'crypto'
 import { getUserById, canCreateNewBot } from './userService.js'
 import { loadConfigForUser } from './configService.js'
 import { getTelegramTokenForUser } from './configService.js'
-import { redisSetNx, redisLpush, redisRpop, redisDel } from './redis.js'
+import { redisSetNx, redisLpush, redisRpop, redisDel, redisExpire, redisReleaseLock } from './redis.js'
 
 const TELEGRAM_API_TIMEOUT_MS = 15_000
+const WEBHOOK_QUEUE_TTL_SECONDS = 300
+const TELEGRAM_UPDATE_DEDUP_TTL_SECONDS = 3600
 const WEBHOOK_RETRY_DELAYS_MS = [0, 1_500, 4_000, 9_000]
 const WEBHOOK_BACKGROUND_RETRY_DELAYS_MS = [10_000, 30_000, 60_000, 120_000]
 
@@ -709,11 +711,48 @@ export async function processTelegramWebhookUpdateForUser(userId, update) {
 
   setObservability(userId, { lastUpdateAt: toIsoNow() })
 
-  const queueKey = `webhook_queue:${userId}:${telegramId}`
-  await redisLpush(queueKey, update)
+  // Telegram mengirim ulang update yang tidak ter-ack. Tanpa dedup, update
+  // ganda masuk ke queue dan diproses dua kali (order/session state ikut
+  // berubah dua kali).
+  const updateId = update?.update_id
+  const dedupKey = Number.isInteger(updateId)
+    ? `telegram_update:${userId}:${updateId}`
+    : null
 
+  if (dedupKey) {
+    const baru = await redisSetNx(
+      dedupKey,
+      '1',
+      TELEGRAM_UPDATE_DEDUP_TTL_SECONDS,
+    ).catch(() => true)
+
+    if (!baru) {
+      // Redeliveri: jangan antrekan dua kali, tapi tetap kuras queue — update
+      // sebelumnya mungkin sudah masuk antrean tapi tidak terproses karena bot
+      // belum siap.
+      return drainTelegramUpdateQueue(userId, telegramId)
+    }
+  }
+
+  const queueKey = `webhook_queue:${userId}:${telegramId}`
+  try {
+    await redisLpush(queueKey, update)
+  } catch (error) {
+    // Update belum tersimpan di mana pun; biarkan Telegram mengirim ulang.
+    if (dedupKey) await redisDel(dedupKey).catch(() => {})
+    throw error
+  }
+  // Queue tanpa TTL bisa menumpuk selamanya kalau drainer mati di tengah jalan.
+  await redisExpire(queueKey, WEBHOOK_QUEUE_TTL_SECONDS).catch(() => {})
+
+  return drainTelegramUpdateQueue(userId, telegramId)
+}
+
+async function drainTelegramUpdateQueue(userId, telegramId) {
+  const queueKey = `webhook_queue:${userId}:${telegramId}`
   const lockKey = `webhook_lock:${userId}:${telegramId}`
-  const acquired = await redisSetNx(lockKey, '1', 30)
+  const lockToken = crypto.randomUUID()
+  const acquired = await redisSetNx(lockKey, lockToken, 30)
   if (!acquired) {
     return { success: true }
   }
@@ -733,7 +772,9 @@ export async function processTelegramWebhookUpdateForUser(userId, update) {
       botData.bot.processUpdate(item)
     }
   } finally {
-    await redisDel(lockKey)
+    // Token: drainer lain bisa sudah memegang lock ini kalau TTL kita lewat,
+    // dan redisDel buta akan melepaskan lock milik mereka.
+    await redisReleaseLock(lockKey, lockToken).catch(() => {})
   }
 
   return { success: true }

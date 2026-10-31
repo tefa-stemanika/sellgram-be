@@ -41,16 +41,30 @@ Multi-tenant: each `User` has isolated bot config, credentials, products, orders
 Redis key patterns:
 - `order:{userId}:{telegramId}` — active order (TTL 3600s)
 - `session:{userId}:{telegramId}` — conversation state (TTL 1800s)
-- `webhook_queue:{userId}:{telegramId}` / `webhook_lock:{userId}:{telegramId}` — queue+lock serde (TTL 30s)
+- `webhook_queue:{userId}:{telegramId}` / `webhook_lock:{userId}:{telegramId}` — antrean + lock update Telegram (queue TTL 300s, lock TTL 30s dengan token fencing; `redisReleaseLock`/`redisRefreshLock` tidak pernah menyentuh lock milik drainer lain)
 - `welcome_sent:{userId}:{chatId}` — dedup (TTL 24h)
+- `telegram_update:{userId}:{update_id}` — dedup redeliveri Telegram (TTL 3600s), dipasang sebelum update masuk queue; kunci dilepas kalau push ke queue gagal, dan redeliveri tetap menguras antrean (update sebelumnya bisa saja tertahan karena bot belum siap)
 - `ratelimit:{ip}` — sliding window (30 req/min)
 - `tenant_map:{hash}` — token→userId lookup (TTL 600s)
 - `tenant_config:{userId}` — config cache (TTL 600s)
 - `whatsapp_msg:{userId}:{messageId}` — Evolution webhook dedup (TTL 600s)
-- `whatsapp_queue:{userId}:{chatId}` / `whatsapp_lock:{userId}:{chatId}` — WhatsApp per-chat message queue+lock (lock TTL 60s)
+- `whatsapp_queue:{userId}:{chatId}` / `whatsapp_lock:{userId}:{chatId}` — WhatsApp per-chat message queue (TTL 300s) + lock (TTL 60s, released by Lua compare-and-delete with a fencing token)
 - `whatsapp_lid:{userId}:{lid}` — LID→phone JID mapping cache (TTL 30d; miss marker 5m)
 
 Webhook-only — bot instances use `polling: false`. Webhook is set on Telegram API via botManager at spawn time. WhatsApp uses Evolution API webhook (`messages.upsert` only) configured at startup or via credential update; messages are serialized per chat through the Redis queue. Incoming `@lid` JIDs are mapped to the phone JID via `key.remoteJidAlt` / `senderPn` / `participantAlt` (Evolution >= 2.3.x), with a cached contact-profile fallback for Evolution 2.2.x; replies always target the phone JID when a mapping exists.
+
+Shared helpers (do not duplicate locally):
+- `src/services/whatsappJid.js` — `normalizeWhatsAppJid`, `extractPhoneFromJid`, `normalizePhoneJid`. Single source for JID/device-suffix/`@lid` rules.
+- `src/services/paymentSettlement.js` — `settlePayment()`. Satu-satunya jalan untuk mengubah status pembayaran order (webhook Midtrans dan `POST /api/public/orders/:orderId/verify`). Klaim status dengan `updateMany` CAS yang **wajib** `paidAt: null` (penanda "belum pernah dibayar" — status bisa turun lagi ke `PROCESSING` oleh strategi fulfillment manual, jadi status saja tidak cukup), lalu antrekan job dengan `jobId` deterministik. Worker (`workers.js`) menjaga idempotensi efek samping: `deductStock` hanya kalau belum ada `StockLog type: 'SALE'` untuk order itu, `refundStock` hanya kalau **sudah ada** `'SALE'` dan belum ada `'REFUND'` (stok hanya dipotong pada payment-success, jadi order expired yang tidak pernah lunas tidak punya apa pun untuk dikembalikan), dan customer hanya di-upsert kalau `customerId` masih kosong.
+- `src/services/safeText.js` — `safePlainText`, `safeEmoji`. Every tenant- or customer-controlled string injected into a chat or admin message goes through these first: Telegram sends `parse_mode: 'Markdown'` and WhatsApp always parses markup, so a stray `* _ ~ ` [ ]` in a product name breaks the whole message.
+
+WhatsApp command parsing is **slash-only** for order actions (`/konfirmasi`, `/confirm`, `/reset`); `start`/`mulai`, `menu`, `help`/`bantuan`, `pesan`/`order`, `batal`/`cancel`, and `status` work with or without a slash. Bare `konfirmasi`/`reset`/`bayar` are NOT commands — unmatched text is first offered to session-state input (product/quantity selection), then to the AI seller (or the product menu when AI is off). `confirmOrder` re-fetches the product for current price/availability and marks the order `PAYMENT_FAILED` if transaction creation fails after the order row was saved.
+
+Error codes from the WhatsApp lifecycle endpoints are stable strings: `not_configured`, `public_base_url_missing`, `webhook_secret_missing`, `invalid_number`, `server_unreachable`, `instance_missing`, `instance_limit_reached`, `create_failed`, `restart_failed`, `webhook_failed`. `success: true` from restart requires both the restart and the webhook re-set; transient upstream failures map to HTTP 503, others 502.
+
+Broadcast channels: only `TELEGRAM` is implemented. `broadcastService.assertSupportedChannel` rejects `WHATSAPP`/`EMAIL` with HTTP 400 + `code: 'channel_not_supported'`; the error middleware forwards `code` whenever an error carries `statusCode`.
+
+Bot health (`botHealthService.js`) checks WhatsApp for every tenant that has Evolution credentials — `getWhatsAppConfiguredUserIds()` — not only tenants with a live Telegram bot, emitting `WHATSAPP_NOT_CONNECTED` / `WHATSAPP_CHECK_FAILED` (warning) and `WHATSAPP_WEBHOOK_NOT_SYNCED` (critical).
 
 ## Testing
 
@@ -58,7 +72,7 @@ No framework — plain ESM scripts in `tests/`. Creates real DB records via `tes
 
 Test patterns:
 - `telegramId` is Prisma `BigInt` — always convert with `Number()` for JSON/Telegram API
-- Order webhook flow: `findFirst({ where: { orderId } })` → update by primary `id`
+- Order webhook flow: `findMany({ where: { orderId } })` → verifikasi signature per kandidat (kolisi lintas tenant mungkin karena `orderId` cuma unik dalam tenant), order terpilih yang `totalPrice`-nya sama dengan `parseGrossAmount(gross_amount)` → klaim status dengan `updateMany` CAS lewat `paymentSettlement.js` `settlePayment()` (status ditulis **sebelum** job diantre karena `fulfillmentWorker` membuang job order non-`COMPLETED`; kalau antrean gagal klaim dilepas lagi dan respons 500 agar Midtrans retry). `jobId` deterministik `payment-success-<rowId>` / `payment-failed-<rowId>` — BullMQ menolak `:`. `COMPLETED` tidak bisa diturunkan jadi `PAYMENT_FAILED`. `POST /api/public/orders/:orderId/verify` memakai helper yang sama
 - `midtransOrderId` = same value as `orderId` (unique per user)
 - Delete cascade: `orderItem` → `order` → `product` → `user`
 
@@ -78,3 +92,5 @@ WhatsApp endpoints:
 - `POST /api/bots/whatsapp/restart` — restart instance + re-set webhook; `/reconnect` is an alias.
 
 Order source `WHATSAPP` stores the destination JID in `Order.whatsappId`; payment/fulfillment notifications are routed through Evolution `sendText`.
+
+Buyer identity must be **source-aware** (`adminBot.buildBuyerIdentity` / `buildBuyerLabel`): Telegram orders show `Telegram ID`, WhatsApp orders show `Sumber: WhatsApp` + `No. HP` resolved from `customerPhone` then `extractPhoneFromJid(whatsappId)`. Never print a `null` Telegram ID for a WhatsApp order. `customerService.upsertCustomerFromOrder` and `ticketService.resolveCustomerContact` use the same JID→phone fallback, and a raw `@lid` must never be stored in `Ticket.customerContact`. Dashboard `ordersBySource` / `revenueBySource` include `TELEGRAM`, `WHATSAPP`, `WEBSITE`.

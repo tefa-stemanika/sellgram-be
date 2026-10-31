@@ -23,6 +23,11 @@ import {
   Timer,
 } from './test-helpers.js'
 import { isPaymentSuccess, isPaymentFailed } from '../src/services/midtrans.js'
+import { handleMidtransWebhook } from '../src/api/controllers/webhook.controller.js'
+import { notifQueue } from '../src/services/queue.js'
+import { redisDel, redisPing } from '../src/services/redis.js'
+import { encrypt } from '../src/utils/encryption.js'
+import crypto from 'node:crypto'
 
 const ctx = new TestContext()
 
@@ -359,6 +364,122 @@ async function testWebhookUpdateWithPrimaryKey() {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Controller-level test: job terantre dulu, status belakangan, dan order milik
+// tenant lain dengan orderId sama tidak boleh ikut ditandai lunas.
+// ────────────────────────────────────────────────────────────────────────────
+
+async function testWebhookControllerQueuesBeforeCompleting() {
+  console.log(
+    '\n📋 Test: Webhook controller antrekan job sebelum mengubah status',
+  )
+
+  const serverKey = `sk-test-${Date.now()}`
+  const userA = await createTestUser(ctx)
+  const userB = await createTestUser(ctx)
+
+  try {
+    for (const user of [userA, userB]) {
+      await prisma.botCredential.create({
+        data: {
+          userId: user.user.id,
+          key: 'MIDTRANS_SERVER_KEY_SANDBOX',
+          value: encrypt(serverKey),
+        },
+      })
+      await redisDel(`tenant_config:${user.user.id}`).catch(() => {})
+    }
+
+    const productsA = await createTestProducts(ctx, userA.user.id, 1)
+    const productsB = await createTestProducts(ctx, userB.user.id, 1)
+    const orderA = await createTestOrder(ctx, userA.user.id, productsA[0].id, 1)
+    const orderB = await createTestOrder(ctx, userB.user.id, productsB[0].id, 2)
+
+    await prisma.order.update({
+      where: { id: orderB.id },
+      data: { orderId: orderA.orderId },
+    })
+
+    const notification = createMidtransNotification(orderA.orderId, 'settlement')
+    notification.gross_amount = String(orderA.totalPrice)
+    notification.signature_key = crypto
+      .createHash('sha512')
+      .update(
+        `${notification.order_id}${notification.status_code}${notification.gross_amount}${serverKey}`,
+      )
+      .digest('hex')
+
+    const response = await callWebhook(notification)
+
+    const storedA = await prisma.order.findUnique({ where: { id: orderA.id } })
+    const storedB = await prisma.order.findUnique({ where: { id: orderB.id } })
+
+    assertEqual(
+      storedB.status,
+      'PENDING',
+      'order tenant lain dengan orderId sama tidak disentuh',
+    )
+
+    // Redis hidup = cabang 200 wajib dipakai; cabang 500 hanya sah kalau
+    // queue memang tidak bisa dihubungi (kalau tidak, regresi jobId lolos
+    // diam-diam lewat cabang pengaman).
+    const redisHidup = await redisPing().catch(() => false)
+
+    if (redisHidup) {
+      assertEqual(
+        response.status,
+        200,
+        `webhook sah dengan Redis hidup harus 200, dapat ${response.status}: ${JSON.stringify(response.body)}`,
+      )
+      assertEqual(storedA.status, 'COMPLETED', 'nominal cocok → order dilunasi')
+
+      const job = await notifQueue.getJob(`payment-success-${orderA.id}`)
+      assert(
+        job !== null,
+        'job pemenuhan terantre dengan jobId deterministik (id tanpa tanda :)',
+      )
+
+      const dup = await callWebhook(notification)
+      assertEqual(dup.status, 200, 'webhook duplikat dijawab 200')
+      assertEqual(dup.body?.skipped, true, 'webhook duplikat tidak diproses ulang')
+      await job?.remove().catch(() => {})
+    } else {
+      // Queue mati: order harus tetap PENDING supaya retry Midtrans memproses
+      // ulang, tidak jadi lunas tanpa pemenuhan.
+      assertEqual(response.status, 500, 'queue mati → 500 agar Midtrans retry')
+      assertEqual(
+        storedA.status,
+        'PENDING',
+        'status tidak dinaikkan sebelum job terantre',
+      )
+    }
+
+    console.log('✅ Webhook controller ordering test PASSED\n')
+  } finally {
+    for (const user of [userA, userB]) {
+      await redisDel(`tenant_config:${user.user.id}`).catch(() => {})
+    }
+  }
+}
+
+async function callWebhook(notification) {
+  const state = { status: 0, body: null }
+  const res = {
+    status(code) {
+      state.status = code
+      return res
+    },
+    json(body) {
+      state.body = body
+      return res
+    },
+  }
+  await handleMidtransWebhook({ body: notification }, res, (err) => {
+    throw err
+  })
+  return state
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Main Test Runner
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -374,6 +495,7 @@ async function runAllTests() {
     await testMultiUserPaymentIsolation()
     await testWebhookOrderIdLookup()
     await testWebhookUpdateWithPrimaryKey()
+    await testWebhookControllerQueuesBeforeCompleting()
 
     console.log('═════════════════════════════════════════════════════════════')
     console.log('✅ ALL WEBHOOK TESTS PASSED!')

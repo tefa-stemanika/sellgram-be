@@ -1,16 +1,27 @@
 // src/services/whatsappManager.js
 // Transport layer WhatsApp (Evolution API): webhook, queue, status, dan pesan keluar.
 
+import { randomUUID } from 'node:crypto'
+import prisma from './db.js'
 import {
+  getRedisClient,
   redisSetNx,
   redisGet,
   redisSet,
   redisLpush,
   redisRpop,
+  redisRpush,
   redisLrange,
-  redisDel,
+  redisExpire,
+  redisReleaseLock,
+  redisRefreshLock,
 } from './redis.js'
 import { getAllActiveUsers } from './userService.js'
+import {
+  normalizePhoneJid,
+  normalizeWhatsAppJid,
+  maskChatId,
+} from './whatsappJid.js'
 import {
   getWhatsAppConfigForUser,
   getWhatsAppClientForUser,
@@ -20,16 +31,20 @@ import {
   buildEvolutionWebhookUrl,
   buildTenantInstanceName,
 } from './evolution.js'
-import {
-  handleIncomingWhatsAppMessage,
-  normalizeWhatsAppJid,
-} from '../handlers/whatsappHandler.js'
+import { handleIncomingWhatsAppMessage } from '../handlers/whatsappHandler.js'
 
 export { buildTenantInstanceName }
 
 const WEBHOOK_EVENTS = ['MESSAGES_UPSERT']
 const DEDUP_TTL_SECONDS = 600
 const LOCK_TTL_SECONDS = 60
+const QUEUE_TTL_SECONDS = 300
+// Batas antrean per chat. Tanpa ini, satu chat yang drainer-nya sedang sibuk
+// (satu giliran AI bisa puluhan detik) bisa menumpuk payload tanpa batas.
+const MAX_QUEUED_MESSAGES = 50
+// Pesan yang tertahan di queue lebih dari ini tidak dijawab lagi: konteks
+// percakapan sudah berubah dan reply telat membingungkan pelanggan.
+const MAX_QUEUED_MESSAGE_AGE_SECONDS = 900
 const LID_CACHE_TTL_SECONDS = 60 * 60 * 24 * 30
 const LID_MISS_TTL_SECONDS = 60 * 5
 const LID_MISS_VALUE = '-'
@@ -584,11 +599,13 @@ export async function restartWhatsAppForUser(
 
   let restarted = false
   let restartError = null
+  let restartTransient = false
   try {
     await ctx.client.restart()
     restarted = true
   } catch (error) {
     restartError = error.message
+    restartTransient = Boolean(error?.transient)
 
     if (error?.status === 404) {
       return {
@@ -611,13 +628,28 @@ export async function restartWhatsAppForUser(
   )
   const status = await getWhatsAppStatusForUser(userId, { publicBaseUrl })
 
+  // Restart yang gagal harus terlihat oleh tenant walaupun webhook berhasil;
+  // kalau tidak, dashboard menampilkan "sukses" untuk instance yang masih mati.
+  const success = restarted && webhookResult.success
+
   return {
-    success: webhookResult.success,
-    code: webhookResult.success ? null : 'webhook_failed',
+    success,
+    code: success
+      ? null
+      : restarted
+        ? 'webhook_failed'
+        : 'restart_failed',
     instance: ctx.config.instance,
     restarted,
     restartError,
-    reason: webhookResult.success ? null : webhookResult.reason,
+    transient: restarted
+      ? Boolean(webhookResult.transient)
+      : restartTransient,
+    reason: success
+      ? null
+      : restarted
+        ? webhookResult.reason
+        : restartError || 'Gagal me-restart instance WhatsApp.',
     webhookUrl: webhookResult.webhookUrl || null,
     webhook: webhookResult,
     status,
@@ -671,12 +703,16 @@ export async function initializeWhatsAppWebhooksForActiveUsers(publicBaseUrl) {
       continue
     }
 
-    const result = await configureWhatsAppWebhookForUser(user.id, baseUrl)
+    // Idempotent: hanya panggil /webhook/set bila URL/event memang berubah,
+    // supaya boot tidak menimpa konfigurasi webhook tenant yang sudah benar.
+    const result = await ensureWhatsAppWebhookForUser(user.id, baseUrl)
     if (result.success) {
       summary.configured++
-      console.log(
-        `[WhatsApp] Webhook user=${user.id} instance="${result.instance}" → ${result.webhookUrl}`,
-      )
+      if (result.action !== 'unchanged') {
+        console.log(
+          `[WhatsApp] Webhook user=${user.id} instance="${result.instance}" → ${result.webhookUrl}`,
+        )
+      }
     } else {
       summary.failed++
       console.warn(
@@ -690,14 +726,6 @@ export async function initializeWhatsAppWebhooksForActiveUsers(publicBaseUrl) {
   )
 
   return summary
-}
-
-function normalizePhoneJid(value) {
-  const jid = normalizeWhatsAppJid(value)
-  if (!jid.endsWith('@s.whatsapp.net')) return null
-
-  const digits = jid.split('@')[0].replace(/\D/g, '')
-  return digits ? `${digits}@s.whatsapp.net` : null
 }
 
 /**
@@ -781,7 +809,7 @@ async function resolveOutboundJid(userId, to, client) {
     resolved = await resolveLidViaContacts(client, remoteJid)
   } catch (error) {
     console.warn(
-      `[WhatsApp] Gagal memetakan ${remoteJid} lewat kontak: ${error.message}`,
+      `[WhatsApp] Gagal memetakan ${maskChatId(remoteJid)} lewat kontak: ${error.message}`,
     )
   }
 
@@ -794,10 +822,47 @@ async function resolveOutboundJid(userId, to, client) {
     () => {},
   )
   console.warn(
-    `[WhatsApp] Tujuan ${remoteJid} belum bisa dipetakan ke nomor telepon; ` +
+    `[WhatsApp] Tujuan ${maskChatId(remoteJid)} belum bisa dipetakan ke nomor telepon; ` +
       'pesan tetap dikirim ke JID @lid dan bisa gagal di Evolution < 2.3.',
   )
   return remoteJid
+}
+
+const CHAT_STATE_PREFIXES = ['order', 'session', 'welcome_sent', 'whatsapp_queue']
+
+/**
+ * Chat ID bisa berubah dari `@lid` ke nomor telepon beberapa pesan setelah
+ * pemetaan berhasil (Evolution 2.2.x). State order/session yang sudah ditulis
+ * di kunci lama harus ikut pindah, kalau tidak order yang sedang CONFIRMING
+ * menggantung di kunci yang tidak pernah dipakai lagi.
+ */
+export async function migrateChatState(userId, fromChatId, toChatId) {
+  if (!fromChatId || !toChatId || fromChatId === toChatId) return
+
+  const client = getRedisClient()
+
+  for (const prefix of CHAT_STATE_PREFIXES) {
+    const fromKey = `${prefix}:${userId}:${fromChatId}`
+    const toKey = `${prefix}:${userId}:${toChatId}`
+
+    try {
+      if ((await client.exists(fromKey)) === 0) continue
+      const moved = await client.renamenx(fromKey, toKey)
+      // Kunci tujuan sudah ada (mis. state @lid masih dipakai drainer lain,
+      // atau state nomor telepon yang lebih baru). Jangan menimpa maupun
+      // membuang sumbernya: biarkan TTL yang membersihkan supaya state yang
+      // sedang aktif tidak hilang.
+      if (!moved) {
+        console.warn(
+          `[WhatsApp] State ${prefix} tidak dipindahkan (tujuan sudah ada) user=${userId} chat=${maskChatId(toChatId)}`,
+        )
+      }
+    } catch (error) {
+      console.warn(
+        `[WhatsApp] Gagal memindahkan state ${prefix} user=${userId}: ${error.message}`,
+      )
+    }
+  }
 }
 
 async function resolveIncomingChat(userId, key, client) {
@@ -812,6 +877,7 @@ async function resolveIncomingChat(userId, key, client) {
       alternative,
       LID_CACHE_TTL_SECONDS,
     ).catch(() => {})
+    await migrateChatState(userId, remoteJid, alternative)
     return alternative
   }
 
@@ -825,12 +891,13 @@ async function resolveIncomingChat(userId, key, client) {
     resolved = await resolveLidViaContacts(client, remoteJid)
   } catch (error) {
     console.warn(
-      `[WhatsApp] Gagal memetakan ${remoteJid} lewat kontak: ${error.message}`,
+      `[WhatsApp] Gagal memetakan ${maskChatId(remoteJid)} lewat kontak: ${error.message}`,
     )
   }
 
   if (resolved) {
     await redisSet(cacheKey, resolved, LID_CACHE_TTL_SECONDS).catch(() => {})
+    await migrateChatState(userId, remoteJid, resolved)
     return resolved
   }
 
@@ -838,13 +905,21 @@ async function resolveIncomingChat(userId, key, client) {
     () => {},
   )
   console.warn(
-    `[WhatsApp] JID ${remoteJid} belum bisa dipetakan ke nomor telepon. ` +
+    `[WhatsApp] JID ${maskChatId(remoteJid)} belum bisa dipetakan ke nomor telepon. ` +
       'Upgrade Evolution API ke >= 2.3.x agar webhook menyertakan remoteJidAlt.',
   )
   return remoteJid
 }
 
-async function drainQueue({ userId, chatId, queueKey, lockKey }) {
+export function isStaleQueuedMessage(item) {
+  const raw = Number(item?.messageTimestamp)
+  if (!Number.isFinite(raw) || raw <= 0) return false
+  // Evolution ada yang mengirim detik, ada yang milidetik tergantung versi.
+  const timestampSeconds = raw > 1e11 ? Math.floor(raw / 1000) : raw
+  return Math.floor(Date.now() / 1000) - timestampSeconds > MAX_QUEUED_MESSAGE_AGE_SECONDS
+}
+
+async function drainQueue({ userId, chatId, queueKey, lockKey, lockToken }) {
   let ownsLock = true
 
   try {
@@ -853,18 +928,67 @@ async function drainQueue({ userId, chatId, queueKey, lockKey }) {
 
       if (item === null) {
         // Lepas lock dulu, lalu cek apakah ada pesan yang masuk di sela terakhir.
-        await redisDel(lockKey)
+        await redisReleaseLock(lockKey, lockToken)
         ownsLock = false
 
         const pending = await redisLrange(queueKey, 0, 0).catch(() => [])
         if (pending.length === 0) return
 
-        const reacquired = await redisSetNx(lockKey, '1', LOCK_TTL_SECONDS)
+        const reacquired = await redisSetNx(lockKey, lockToken, LOCK_TTL_SECONDS)
         if (!reacquired) return
 
         ownsLock = true
         continue
       }
+
+      // Perpanjangi TTL sebelum memproses: satu giliran bisa memakan waktu
+      // panjang (AI + beberapa kirim pesan) dan lock tidak boleh kedaluwarsa.
+      // Kalau refresh menolak, lock sudah pindah tangan — pesan dikembalikan
+      // ke ekor queue supaya drainer yang sah yang memproses duluan, bukan
+      // dua-duanya. Fail-closed: kegagalan refresh diperlakukan sebagai
+      // kehilangan lock; kalau pengembalian ke queue juga gagal (Redis mati),
+      // pesan diproses saja daripada hilang — state-nya toh tidak akan kebaca.
+      const masihMemegang = await redisRefreshLock(
+        lockKey,
+        lockToken,
+        LOCK_TTL_SECONDS,
+      ).catch(() => false)
+
+      if (!masihMemegang) {
+        const dikembalikan = await redisRpush(queueKey, item)
+          .then(() => true)
+          .catch(() => false)
+
+        if (dikembalikan) {
+          ownsLock = false
+          await redisExpire(queueKey, QUEUE_TTL_SECONDS).catch(() => {})
+          console.warn(
+            `[WhatsApp] Lock chat ${maskChatId(chatId)} user=${userId} sudah pindah tangan, pesan dikembalikan ke queue`,
+          )
+          return
+        }
+
+        console.error(
+          `[WhatsApp] Lock chat ${maskChatId(chatId)} user=${userId} hilang dan pesan tidak bisa dikembalikan — diproses di sini`,
+        )
+      }
+
+      if (isStaleQueuedMessage(item)) {
+        console.warn(
+          `[WhatsApp] Pesan kadaluarsa di queue dilewati user=${userId} chat=${maskChatId(chatId)}`,
+        )
+        continue
+      }
+
+      // Satu giliran bisa lebih lama dari TTL lock (AI + beberapa kirim pesan),
+      // jadi lock dipanjangkan selama pemrosesan agar drainer lain tidak masuk.
+      const heartbeat = setInterval(() => {
+        redisRefreshLock(lockKey, lockToken, LOCK_TTL_SECONDS)
+          .then((masihMilikKita) => {
+            if (!masihMilikKita) clearInterval(heartbeat)
+          })
+          .catch(() => {})
+      }, Math.max(1000, Math.floor((LOCK_TTL_SECONDS * 1000) / 3)))
 
       try {
         await handleIncomingWhatsAppMessage({
@@ -874,13 +998,15 @@ async function drainQueue({ userId, chatId, queueKey, lockKey }) {
         })
       } catch (error) {
         console.error(
-          `[WhatsApp] Gagal memproses pesan user=${userId} chat=${chatId}: ${error.message}`,
+          `[WhatsApp] Gagal memproses pesan user=${userId} chat=${maskChatId(chatId)}: ${error.message}`,
         )
+      } finally {
+        clearInterval(heartbeat)
       }
     }
   } finally {
     if (ownsLock) {
-      await redisDel(lockKey).catch(() => {})
+      await redisReleaseLock(lockKey, lockToken).catch(() => {})
     }
   }
 }
@@ -931,6 +1057,8 @@ export async function processEvolutionWebhookForUser(userId, payload) {
     const queueKey = `whatsapp_queue:${userId}:${chatId}`
     const lockKey = `whatsapp_lock:${userId}:${chatId}`
 
+    let masukAntrean = false
+
     try {
       const fresh = await redisSetNx(
         dedupKey,
@@ -939,16 +1067,37 @@ export async function processEvolutionWebhookForUser(userId, payload) {
       )
       if (!fresh) continue
 
-      await redisLpush(queueKey, item)
+      const queuedLength = await redisLpush(queueKey, item)
+      masukAntrean = true
+      await redisExpire(queueKey, QUEUE_TTL_SECONDS).catch(() => {})
 
-      const acquired = await redisSetNx(lockKey, '1', LOCK_TTL_SECONDS)
+      if (queuedLength > MAX_QUEUED_MESSAGES) {
+        // Buang pesan tertua yang belum terjawab, antrean tidak boleh tumbuh
+        // tanpa batas saat satu chat sedang tersumbat.
+        await redisRpop(queueKey).catch(() => null)
+        console.warn(
+          `[WhatsApp] Antrean chat ${maskChatId(chatId)} penuh (${queuedLength}), pesan tertua dibuang`,
+        )
+      }
+
+      const lockToken = randomUUID()
+      const acquired = await redisSetNx(lockKey, lockToken, LOCK_TTL_SECONDS)
       if (!acquired) continue
 
-      await drainQueue({ userId, chatId, queueKey, lockKey })
+      await drainQueue({ userId, chatId, queueKey, lockKey, lockToken })
     } catch (error) {
       console.error(
-        `[WhatsApp] Redis bermasalah untuk user=${userId} chat=${chatId}: ${error.message}`,
+        `[WhatsApp] Redis bermasalah untuk user=${userId} chat=${maskChatId(chatId)}: ${error.message}`,
       )
+
+      if (masukAntrean) {
+        // Pesannya sudah tersimpan di antrean — diproses di sini juga akan
+        // menghasilkan balasan ganda begitu drainer berikutnya jalan.
+        console.warn(
+          `[WhatsApp] Pesan chat ${maskChatId(chatId)} tetap di antrean, dikuras pada webhook berikutnya`,
+        )
+        continue
+      }
 
       if (fallbackProcessed.has(messageId)) continue
       fallbackProcessed.add(messageId)
@@ -956,7 +1105,7 @@ export async function processEvolutionWebhookForUser(userId, payload) {
       await handleIncomingWhatsAppMessage({ userId, chatId, data: item }).catch(
         (err) => {
           console.error(
-            `[WhatsApp] Fallback proses pesan gagal user=${userId} chat=${chatId}: ${err.message}`,
+            `[WhatsApp] Fallback proses pesan gagal user=${userId} chat=${maskChatId(chatId)}: ${err.message}`,
           )
         },
       )
@@ -964,4 +1113,27 @@ export async function processEvolutionWebhookForUser(userId, payload) {
   }
 
   return { success: true }
+}
+
+/**
+ * User yang punya konfigurasi WhatsApp (kredensial per tenant atau fallback env).
+ * Dipakai health monitor agar tenant tanpa bot Telegram tetap diperiksa.
+ */
+export async function getWhatsAppConfiguredUserIds() {
+  const userIds = new Set()
+
+  const rows = await prisma.botCredential.findMany({
+    where: { key: { in: ['EVOLUTION_API_URL', 'EVOLUTION_API_KEY'] } },
+    select: { userId: true },
+  })
+  for (const row of rows) userIds.add(row.userId)
+
+  const envUrl = String(process.env.EVOLUTION_API_URL || '').trim()
+  const envKey = String(process.env.EVOLUTION_API_KEY || '').trim()
+  if (envUrl && envKey) {
+    const users = await getAllActiveUsers()
+    for (const user of users) userIds.add(user.id)
+  }
+
+  return [...userIds]
 }

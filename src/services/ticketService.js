@@ -1,4 +1,5 @@
 import prisma from './db.js'
+import { extractPhoneFromJid } from './whatsappJid.js'
 import { logActivity } from './ticketActivityService.js'
 
 export async function createTicketFromOrder(order, userId) {
@@ -202,7 +203,8 @@ export async function deleteComment(commentId, userId) {
 function resolveCustomerContact(order) {
   if (order.telegramId) return String(order.telegramId)
   if (order.customerPhone) return order.customerPhone
-  return order.whatsappId ?? null
+  // JID @lid bukan kontak yang bisa dihubungi agent — simpan nomor saja.
+  return extractPhoneFromJid(order.whatsappId)
 }
 
 function buildOrderDescription(order) {
@@ -213,8 +215,6 @@ function buildOrderDescription(order) {
   ]
   if (order.telegramId) lines.push(`Telegram ID: ${order.telegramId}`)
   if (order.customerPhone) lines.push(`Phone: ${order.customerPhone}`)
-  if (order.whatsappId && order.whatsappId !== order.customerPhone) {
-    lines.push(`WhatsApp JID: ${order.whatsappId}`)
-  }
+  if (order.whatsappId) lines.push(`WhatsApp JID: ${order.whatsappId}`)
   return lines.join('\n')
 }

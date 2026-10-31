@@ -34,8 +34,9 @@ if (activeUserIds.length > 0) {
 startWorkers()
 
 // Sinkronkan webhook Evolution API untuk WhatsApp (per tenant).
+// Tidak boleh memblokir listen(): kalau server Evolution lambat/down,
+// health check deploy akan timeout untuk semua tenant.
 import { initializeWhatsAppWebhooksForActiveUsers } from './services/whatsappManager.js'
-await initializeWhatsAppWebhooksForActiveUsers(process.env.PUBLIC_BASE_URL)
 
 // Initialize subscription worker
 const subscriptionWorker = createSubscriptionWorker()
@@ -61,6 +62,16 @@ const server = app.listen(port, () => {
 
 startBotHealthMonitor()
 
+initializeWhatsAppWebhooksForActiveUsers(process.env.PUBLIC_BASE_URL)
+  .then((summary) => {
+    console.log(
+      `[WhatsApp] Sinkronisasi webhook startup: ${summary.configured} berhasil, ${summary.failed} gagal, ${summary.skipped} dilewati.`,
+    )
+  })
+  .catch((error) => {
+    console.error('[WhatsApp] Sinkronisasi webhook startup gagal:', error.message)
+  })
+
 setInterval(() => {
   const stats = getBotsStatistics()
   console.log(`📊 Active bots: ${stats.totalActiveBots}`)
@@ -69,7 +80,17 @@ setInterval(() => {
 async function shutdown(signal) {
   console.log(`\n⏹️  ${signal} diterima — shutdown...`)
   stopBotHealthMonitor()
-  server.close()
+
+  // Tunggu request yang masih berjalan selesai (webhook pembayaran!) sebelum
+  // mematikan sisa sistem; maksimum 5 detik agar shutdown tidak menggantung.
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, 5000)
+    server.close(() => {
+      clearTimeout(timer)
+      resolve()
+    })
+  })
+
   await stopWorkers()
   await subscriptionWorker.close()
   if (broadcastWorker) await broadcastWorker.close()

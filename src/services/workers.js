@@ -3,6 +3,7 @@ import { getBotForUser, configureTelegramWebhookForUser, scheduleTelegramWebhook
 import { notifyAdminOrderSuccessForUser, notifyAdminOrderFailedForUser } from './adminBot.js'
 import { createTicketFromOrder } from './ticketService.js'
 import { upsertCustomerFromOrder } from './customerService.js'
+import { safeEmoji, safePlainText } from './safeText.js'
 import { deductStock, refundStock } from './stockService.js'
 import { createTicketFulfillmentLog } from './fulfillmentService.js'
 import { enqueueFulfillment } from './fulfillment/fulfillmentEngine.js'
@@ -51,7 +52,7 @@ export function startWorkers() {
     if (job.name === 'payment-success') {
       const item = order.orderItems?.[0]
       const itemLabel = item
-        ? `${item.product.emoji || '🛍️'} ${item.product.name} x${item.quantity}`
+        ? `${safeEmoji(item.product.emoji)} ${safePlainText(item.product.name)} x${item.quantity}`
         : ''
 
       if (order.source === 'WHATSAPP') {
@@ -91,13 +92,28 @@ export function startWorkers() {
         return null
       })
 
-      await upsertCustomerFromOrder(order, data.userId).catch(err => {
-        console.error('[Worker] Gagal upsert customer:', err.message)
-      })
+      // Semua efek samping di bawah sini tidak idempoten, jadi setiap langkah
+      // dicek dulu sudah pernah terjadi atau belum. Job ganda tetap mungkin
+      // (jobId yang sudah di-prune dibuat ulang oleh webhook susulan).
+      if (!order.customerId) {
+        await upsertCustomerFromOrder(order, data.userId).catch(err => {
+          console.error('[Worker] Gagal upsert customer:', err.message)
+        })
+      }
 
-      await deductStock(order.id, data.userId).catch(err => {
-        console.error('[Worker] Gagal deduct stock:', err.message)
-      })
+      const sudahPotongStok = await prisma.stockLog
+        .findFirst({ where: { orderId: order.id, type: 'SALE' }, select: { id: true } })
+        .catch(() => null)
+
+      if (sudahPotongStok) {
+        console.warn(
+          `[Worker] Order ${order.orderId} sudah pernah memotong stok, deduct dilewati`,
+        )
+      } else {
+        await deductStock(order.id, data.userId).catch(err => {
+          console.error('[Worker] Gagal deduct stock:', err.message)
+        })
+      }
 
       await incrementMonthlyOrderCount(data.userId).catch(err => {
         console.error('[Worker] Gagal increment order counter:', err.message)
@@ -107,7 +123,9 @@ export function startWorkers() {
         console.error('[Worker] Gagal enqueue fulfillment:', err.message)
       })
 
-      await notifyAdminOrderSuccessForUser(data.userId, order, data.notification)
+      await notifyAdminOrderSuccessForUser(data.userId, order, data.notification).catch(
+        (err) => console.error('[Worker] Gagal kirim notif admin:', err.message),
+      )
 
       if (ticket) {
         await createTicketFulfillmentLog({
@@ -119,6 +137,16 @@ export function startWorkers() {
         }).catch(err => console.error('[Worker] Gagal log fulfillment:', err.message))
       }
     } else if (job.name === 'payment-failed') {
+      // Notifikasi success bisa datang bersamaan dan sudah menuliskan
+      // COMPLETED; jangan mengembalikan stok atau mengirim pesan "gagal" untuk
+      // order yang ternyata lunas.
+      if (order.status === 'COMPLETED' || order.paidAt) {
+        console.warn(
+          `[Worker] Order ${order.orderId} sudah COMPLETED, job payment-failed dilewati`,
+        )
+        return
+      }
+
       if (order.source === 'WHATSAPP') {
         const whatsappTarget = resolveWhatsAppTarget(order)
         if (whatsappTarget) {
@@ -151,11 +179,50 @@ export function startWorkers() {
         }
       }
 
-      await refundStock(order.id, data.userId).catch(err => {
-        console.error('[Worker] Gagal refund stock:', err.message)
-      })
+      // Dibaca ulang tepat sebelum stok kembali: notifikasi settlement yang
+      // datang bersamaan bisa menandai order ini COMPLETED setelah guard di
+      // atas, dan mengembalikan stok untuk order yang lunas itu salah.
+      const statusTerbaru = await prisma.order
+        .findUnique({ where: { id: order.id }, select: { status: true, paidAt: true } })
+        .catch(() => null)
 
-      await notifyAdminOrderFailedForUser(data.userId, order)
+      if (statusTerbaru?.status === 'COMPLETED' || statusTerbaru?.paidAt) {
+        console.warn(
+          `[Worker] Order ${order.orderId} ternyata sudah dibayar, job payment-failed dihentikan`,
+        )
+        return
+      }
+
+      // Stok hanya dipotong pada payment-success, jadi order expired yang tidak
+      // pernah lunas tidak punya apa pun untuk dikembalikan — merefundnya
+      // justru menaikkan stok di atas harga sebenarnya. REFUND juga cuma sekali.
+      const logStok = await prisma.stockLog
+        .findMany({
+          where: { orderId: order.id, type: { in: ['SALE', 'REFUND'] } },
+          select: { type: true },
+        })
+        .catch(() => null)
+
+      const pernahPotong = logStok?.some((log) => log.type === 'SALE')
+      const sudahRefund = logStok?.some((log) => log.type === 'REFUND')
+
+      if (!pernahPotong) {
+        console.warn(
+          `[Worker] Order ${order.orderId} tidak pernah memotong stok, refund dilewati`,
+        )
+      } else if (sudahRefund) {
+        console.warn(
+          `[Worker] Order ${order.orderId} sudah pernah direfund, refund stok dilewati`,
+        )
+      } else {
+        await refundStock(order.id, data.userId).catch(err => {
+          console.error('[Worker] Gagal refund stock:', err.message)
+        })
+      }
+
+      await notifyAdminOrderFailedForUser(data.userId, order).catch((err) =>
+        console.error('[Worker] Gagal kirim notif admin gagal:', err.message),
+      )
 
       const failedTicket = await prisma.ticket.findFirst({ where: { orderId: order.id } })
       if (failedTicket) {

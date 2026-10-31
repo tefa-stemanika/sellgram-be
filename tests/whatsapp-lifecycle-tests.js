@@ -5,16 +5,37 @@
 import 'dotenv/config'
 import http from 'node:http'
 import prisma from '../src/services/db.js'
-import { redisDel, redisQuit } from '../src/services/redis.js'
+import {
+  getRedisClient,
+  redisDel,
+  redisExpire,
+  redisGet,
+  redisLpush,
+  redisQuit,
+  redisReleaseLock,
+  redisRpop,
+  redisSet,
+  redisSetNx,
+} from '../src/services/redis.js'
 import { setCredentialForUser } from '../src/services/configService.js'
+import { upsertCustomerFromOrder } from '../src/services/customerService.js'
+import { createTicketFromOrder } from '../src/services/ticketService.js'
 import {
   buildTenantInstanceName,
   createWhatsAppInstanceForUser,
   connectWhatsAppForUser,
+  migrateChatState,
   restartWhatsAppForUser,
   getWhatsAppStatusForUser,
 } from '../src/services/whatsappManager.js'
-import { createTestUser, assert, assertEqual } from './test-helpers.js'
+import {
+  TestContext,
+  createTestOrder,
+  createTestProducts,
+  createTestUser,
+  assert,
+  assertEqual,
+} from './test-helpers.js'
 
 const API_KEY = 'test-evolution-key'
 const LONG_BASE64 = `data:image/png;base64,${'A'.repeat(120)}`
@@ -23,6 +44,8 @@ function createMockEvolutionServer() {
   const instances = new Map()
   const counters = { create: 0, restart: 0, connect: 0, webhookSet: 0 }
   const calls = { createBodies: [], webhookBodies: [] }
+  const restartFail = new Set()
+  const state = { duplicateNames: false }
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://mock.local')
@@ -40,13 +63,12 @@ function createMockEvolutionServer() {
     const instanceName = rawInstance ? decodeURIComponent(rawInstance) : null
 
     if (group === 'instance' && action === 'fetchInstances' && req.method === 'GET') {
-      return send(
-        200,
-        Array.from(instances.values()).map((item) => ({
-          name: item.instanceName,
-          connectionStatus: item.state,
-        })),
-      )
+      const list = Array.from(instances.values()).map((item) => ({
+        name: item.instanceName,
+        connectionStatus: item.state,
+      }))
+      // Simulasi server yang mengembalikan entri ganda untuk nama yang sama.
+      return send(200, state.duplicateNames ? [...list, ...list] : list)
     }
 
     if (group === 'instance' && action === 'create' && req.method === 'POST') {
@@ -96,6 +118,9 @@ function createMockEvolutionServer() {
       if (!['POST', 'PUT'].includes(req.method)) {
         return send(405, { message: 'Method not allowed' })
       }
+      if (restartFail.has(instanceName)) {
+        return send(500, { message: 'Restart rejected by Evolution' })
+      }
       counters.restart++
       item.state = 'open'
       return send(200, { instance: { instanceName, state: 'open' } })
@@ -123,7 +148,7 @@ function createMockEvolutionServer() {
     return send(404, { message: `No mock route for ${req.method} ${url.pathname}` })
   })
 
-  return { server, instances, counters, calls }
+  return { server, instances, counters, calls, restartFail, state }
 }
 
 function readJson(req) {
@@ -160,7 +185,7 @@ async function runAsync(name, fn) {
   }
 }
 
-const ctx = { createdUserIds: [] }
+const ctx = new TestContext()
 const mock = createMockEvolutionServer()
 const publicBaseUrl = 'https://app.example.com'
 
@@ -343,14 +368,186 @@ try {
       'instance turunan userId',
     )
   })
+
+  await runAsync('restart gagal → success false + code restart_failed', async () => {
+    const victim = await createTestUser(ctx)
+    await setCredentialForUser(victim.user.id, 'EVOLUTION_API_URL', apiUrl)
+    await setCredentialForUser(victim.user.id, 'EVOLUTION_API_KEY', API_KEY)
+
+    const created = await createWhatsAppInstanceForUser(victim.user.id, {
+      publicBaseUrl,
+    })
+    assert(created.success, 'instance korban dibuat')
+
+    mock.restartFail.add(buildTenantInstanceName(victim.user.id))
+
+    const result = await restartWhatsAppForUser(victim.user.id, publicBaseUrl)
+
+    assertEqual(result.success, false, 'restart gagal dilaporkan gagal')
+    assertEqual(result.code, 'restart_failed', 'kode restart_failed')
+    assertEqual(result.restarted, false, 'restarted false')
+    assert(String(result.reason).includes('Restart rejected'), 'alasan dari Evolution')
+    assertEqual(result.webhook.success, true, 'webhook tetap tersinkron')
+  })
+
+  await runAsync('fetchInstances duplikat → instance_limit_reached', async () => {
+    const dup = await createTestUser(ctx)
+    await setCredentialForUser(dup.user.id, 'EVOLUTION_API_URL', apiUrl)
+    await setCredentialForUser(dup.user.id, 'EVOLUTION_API_KEY', API_KEY)
+
+    const created = await createWhatsAppInstanceForUser(dup.user.id, {
+      publicBaseUrl,
+    })
+    assert(created.success, 'instance dibuat sebelum duplikasi disimulasikan')
+
+    mock.state.duplicateNames = true
+    try {
+      const result = await createWhatsAppInstanceForUser(dup.user.id, {
+        publicBaseUrl,
+      })
+
+      assertEqual(result.success, false, 'create ditolak')
+      assertEqual(result.code, 'instance_limit_reached', 'kode instance_limit_reached')
+      assertEqual(result.instanceLimit, 1, 'limit 1')
+    } finally {
+      mock.state.duplicateNames = false
+    }
+  })
+
+  await runAsync('API key salah → status error, bukan dianggap instance hilang', async () => {
+    const wrongKey = await createTestUser(ctx)
+    await setCredentialForUser(wrongKey.user.id, 'EVOLUTION_API_URL', apiUrl)
+    await setCredentialForUser(wrongKey.user.id, 'EVOLUTION_API_KEY', 'bukan-key-benar')
+
+    const status = await getWhatsAppStatusForUser(wrongKey.user.id, { publicBaseUrl })
+
+    assertEqual(status.configured, true, 'konfigurasi ada')
+    assertEqual(status.instanceExists, null, '401 bukan berarti instance tidak ada')
+    assert(
+      status.errors.some((e) => String(e).includes('401')),
+      'error 401 tercatat di status.errors',
+    )
+  })
+
+  await runAsync('redis lock memakai fencing token', async () => {
+    const token = 'token-a'
+    const key = `test_lock:${owner.user.id}`
+
+    assert(await redisSetNx(key, token, 30), 'lock didapat')
+    assertEqual(await redisSetNx(key, 'token-b', 30), false, 'lock tidak bisa direbut')
+    assertEqual(await redisReleaseLock(key, 'token-b'), false, 'pelepasan salah token ditolak')
+    assertEqual(await redisGet(key), token, 'lock masih dipegang token awal')
+    assertEqual(await redisReleaseLock(key, token), true, 'pemegang melepas lock')
+    assertEqual(await redisGet(key), null, 'lock hilang')
+  })
+
+  await runAsync('queue per-chat FIFO dengan TTL', async () => {
+    const key = `whatsapp_queue:${owner.user.id}:test`
+
+    await redisDel(key)
+    await redisLpush(key, { n: 1 })
+    await redisLpush(key, { n: 2 })
+    await redisLpush(key, { n: 3 })
+    await redisExpire(key, 300)
+
+    const first = await redisRpop(key)
+    const second = await redisRpop(key)
+    assertEqual(first.n, 1, 'LPUSH + RPOP = FIFO')
+    assertEqual(second.n, 2, 'urutan kedua terjaga')
+
+    const ttl = await getRedisClient().ttl(key)
+    assert(ttl > 0 && ttl <= 300, 'TTL queue terpasang')
+    await redisDel(key)
+  })
+
+  await runAsync('pembeli WhatsApp tanpa customerPhone tetap jadi Customer', async () => {
+    const products = await createTestProducts(ctx, owner.user.id, 1)
+    const order = await createTestOrder(ctx, owner.user.id, products[0].id)
+
+    await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        source: 'WHATSAPP',
+        telegramId: null,
+        customerPhone: null,
+        customerName: 'Nining',
+        whatsappId: '6281234509876@s.whatsapp.net',
+      },
+    })
+
+    const stored = await prisma.order.findUnique({ where: { id: order.id } })
+    const customer = await upsertCustomerFromOrder(stored, owner.user.id)
+
+    assert(customer, 'customer dibuat dari JID WhatsApp')
+    assertEqual(customer.phone, '6281234509876', 'nomor diturunkan dari JID')
+    assertEqual(customer.hasWhatsapp, true, 'menandai kanal WhatsApp')
+
+    const ticket = await createTicketFromOrder(stored, owner.user.id)
+    assertEqual(
+      ticket.customerContact,
+      '6281234509876',
+      'contact ticket memakai nomor, bukan JID',
+    )
+  })
+
+  await runAsync('state chat ikut pindah saat @lid akhirnya terpetakan', async () => {
+    const lidOwner = await createTestUser(ctx)
+    const lid = '239689676136519@lid'
+    const phoneJid = '6281234509876@s.whatsapp.net'
+    const oldKey = `order:${lidOwner.user.id}:${lid}`
+    const newKey = `order:${lidOwner.user.id}:${phoneJid}`
+    const oldQueue = `whatsapp_queue:${lidOwner.user.id}:${lid}`
+    const newQueue = `whatsapp_queue:${lidOwner.user.id}:${phoneJid}`
+
+    await redisDel(oldKey, newKey)
+    await getRedisClient().del(oldQueue, newQueue).catch(() => {})
+    await redisSet(oldKey, { state: 'confirming', quantity: 2 }, 600)
+    await getRedisClient().rpush(oldQueue, JSON.stringify({ seq: 1 }))
+
+    await migrateChatState(lidOwner.user.id, lid, phoneJid)
+
+    const moved = await redisGet(newKey)
+    assertEqual(
+      moved?.state,
+      'confirming',
+      'order yang sedang CONFIRMING tidak menggantung di kunci @lid',
+    )
+    assertEqual(moved?.quantity, 2, 'isi state ikut pindah')
+    assertEqual(await redisGet(oldKey), null, 'kunci lama dibersihkan')
+    assertEqual(
+      await getRedisClient().llen(newQueue),
+      1,
+      'pesan yang menunggu di antrian chat lama ikut pindah',
+    )
+
+    await redisSet(oldKey, { state: 'confirming', quantity: 9 }, 600)
+    await redisSet(newKey, { state: 'selecting_qty', quantity: 1 }, 600)
+
+    await migrateChatState(lidOwner.user.id, lid, phoneJid)
+
+    const kept = await redisGet(newKey)
+    assertEqual(kept?.state, 'selecting_qty', 'state yang sudah ada di kunci tujuan tidak ditimpa')
+    assertEqual(kept?.quantity, 1, 'isi tujuan tetap milik kunci tujuan')
+    const tertinggal = await redisGet(oldKey)
+    assertEqual(tertinggal?.quantity, 9, 'kunci sumber tidak dibuang saat bentrok')
+    const ttlSumber = await getRedisClient().ttl(oldKey)
+    assert(ttlSumber > 0, 'sisa state sumber tetap dibersihkan oleh TTL')
+
+    await migrateChatState(lidOwner.user.id, phoneJid, phoneJid)
+    await redisDel(oldKey, newKey)
+    await getRedisClient().del(oldQueue, newQueue).catch(() => {})
+  })
 } catch (error) {
   console.error('❌ Test lifecycle gagal di luar runAsync:', error)
   process.exitCode = 1
 } finally {
   for (const userId of ctx.createdUserIds) {
     await redisDel(`tenant_config:${userId}`).catch(() => {})
-    await prisma.user.delete({ where: { id: userId } }).catch(() => {})
   }
+  await ctx.cleanup().catch((err) => {
+    console.error('[lifecycle] cleanup gagal:', err.message)
+    process.exitCode = 1
+  })
   mock.server.close()
   await prisma.$disconnect().catch(() => {})
   await redisQuit().catch(() => {})

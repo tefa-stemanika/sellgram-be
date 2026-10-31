@@ -8,7 +8,11 @@ import {
   getProductById,
   formatRupiah,
 } from '../services/productService.js'
-import { saveOrder, updateOrderPayment } from '../services/orderService.js'
+import {
+  saveOrder,
+  updateOrderPayment,
+  updateOrderStatus,
+} from '../services/orderService.js'
 import { createSnapTransaction } from '../services/midtrans.js'
 import { validateStock } from '../services/stockService.js'
 import { assertMonthlyOrderLimit } from '../services/planLimitService.js'
@@ -21,38 +25,32 @@ import {
 import { getHistory, addMessage, clearHistory } from '../services/session.js'
 import { isAiEnabledForUser, askAI } from '../services/aiProvider.js'
 import { getWhatsAppClientForUser } from '../services/evolution.js'
+import { extractPhoneFromJid, maskChatId } from '../services/whatsappJid.js'
+import { safeEmoji, safePlainText } from '../services/safeText.js'
+import { redisSetNx } from '../services/redis.js'
 
 const MAX_PRODUCTS_IN_MENU = 100
+const WELCOME_DEDUP_TTL_SECONDS = 60 * 60 * 24
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-export function normalizeWhatsAppJid(jid) {
-  return String(jid || '')
-    .trim()
-    .replace(/:\d+@/, '@')
-}
-
-export function extractPhoneFromJid(jid) {
-  const normalized = normalizeWhatsAppJid(jid)
-  if (!normalized.endsWith('@s.whatsapp.net')) return null
-
-  const digits = normalized.split('@')[0].replace(/\D/g, '')
-  return digits || null
-}
-
 function unwrapMessage(message) {
-  let current = message
   const wrappers = [
     'ephemeralMessage',
     'viewOnceMessage',
     'viewOnceMessageV2',
+    'viewOnceMessageV2Extension',
     'documentWithCaptionMessage',
+    'editedMessage',
   ]
 
-  for (const key of wrappers) {
-    if (current?.[key]?.message) {
-      current = current[key].message
-    }
+  let current = message
+  // Wrapper bisa bersarang (editedMessage → ephemeralMessage → ...), jadi
+  // ulangi sampai tidak ada wrapper tersisa.
+  for (let depth = 0; depth < 5; depth += 1) {
+    const key = wrappers.find((name) => current?.[name]?.message)
+    if (!key) break
+    current = current[key].message
   }
 
   return current || {}
@@ -60,6 +58,7 @@ function unwrapMessage(message) {
 
 /**
  * Ambil konten yang bisa diproses dari payload messages.upsert Evolution.
+ * Bot hanya menerima teks; pesan interaktif (list/button) sudah tidak dipakai.
  */
 export function extractWhatsAppMessage(data) {
   const message = unwrapMessage(data?.message)
@@ -70,36 +69,6 @@ export function extractWhatsAppMessage(data) {
 
   if (message.extendedTextMessage?.text?.trim()) {
     return { kind: 'text', text: message.extendedTextMessage.text.trim() }
-  }
-
-  const listReply = message.listResponseMessage
-  const selectedRowId =
-    listReply?.singleSelectReply?.selectedRowId ||
-    listReply?.singleSelectReply?.selectedRowID
-  if (selectedRowId) {
-    return {
-      kind: 'selection',
-      id: String(selectedRowId),
-      text: listReply?.title || '',
-    }
-  }
-
-  const buttonReply = message.buttonsResponseMessage
-  if (buttonReply?.selectedButtonId) {
-    return {
-      kind: 'selection',
-      id: String(buttonReply.selectedButtonId),
-      text: buttonReply.selectedDisplayText || '',
-    }
-  }
-
-  const templateReply = message.templateButtonReplyMessage
-  if (templateReply?.selectedId) {
-    return {
-      kind: 'selection',
-      id: String(templateReply.selectedId),
-      text: templateReply.selectedDisplayText || '',
-    }
   }
 
   const caption =
@@ -118,59 +87,64 @@ export function extractWhatsAppMessage(data) {
   return null
 }
 
-function singleLine(value) {
-  return String(value ?? '')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
 export function buildProductListText(products) {
   if (!Array.isArray(products) || products.length === 0) return null
 
   const visible = products.slice(0, MAX_PRODUCTS_IN_MENU)
   const lines = visible.map(
     (product, index) =>
-      `${index + 1}. ${product.emoji || '🛍️'} ${singleLine(product.name)} — ${formatRupiah(product.price)}`,
+      `${index + 1}. ${safeEmoji(product.emoji)} ${safePlainText(product.name, 80)} — ${formatRupiah(product.price)}`,
   )
 
   return `🛍️ *Menu Produk*\n\n${lines.join('\n')}\n\nKetik nomor produk untuk memesan.`
 }
 
-function parseCommand(text) {
+// Perintah yang membuat/membatalkan transaksi hanya diterima dengan prefix
+// "/" agar kalimat biasa ("bayar nanti", "reset dulu") tidak memicu aksi.
+const SLASH_ONLY_COMMANDS = {
+  konfirmasi: 'confirm',
+  confirm: 'confirm',
+  reset: 'reset',
+}
+
+const OPEN_COMMANDS = {
+  start: 'start',
+  mulai: 'start',
+  menu: 'menu',
+  help: 'help',
+  bantuan: 'help',
+  pesan: 'order',
+  order: 'order',
+  batal: 'cancel',
+  cancel: 'cancel',
+  status: 'status',
+}
+
+export function parseCommand(text) {
   const normalized = String(text || '').trim().toLowerCase()
   if (!normalized) return null
 
   const [first] = normalized.split(/\s+/)
-  const commands = {
-    '/start': 'start',
-    start: 'start',
-    mulai: 'start',
-    '/menu': 'menu',
-    menu: 'menu',
-    '/pesan': 'order',
-    pesan: 'order',
-    order: 'order',
-    '/help': 'help',
-    help: 'help',
-    bantuan: 'help',
-    '/batal': 'cancel',
-    batal: 'cancel',
-    cancel: 'cancel',
-    '/konfirmasi': 'confirm',
-    konfirmasi: 'confirm',
-    confirm: 'confirm',
-    bayar: 'confirm',
-    '/status': 'status',
-    status: 'status',
-    '/reset': 'reset',
-    reset: 'reset',
+  const word = first.startsWith('/') ? first.slice(1) : first
+  if (!word) return null
+
+  if (first.startsWith('/')) {
+    return SLASH_ONLY_COMMANDS[word] || OPEN_COMMANDS[word] || null
   }
 
-  return commands[first] || null
+  return OPEN_COMMANDS[word] || null
 }
 
+// AI dan balasan internal memakai Markdown gaya Telegram; WhatsApp memakai
+// penanda tunggal. Tautan [teks](url) ditulis ulang karena tidak dirender.
 function toWhatsAppText(text) {
-  return String(text || '').replace(/\*\*(.+?)\*\*/g, '*$1*')
+  return String(text || '')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '$1 ($2)')
+    .replace(/\*\*(.+?)\*\*/g, '*$1*')
+    .replace(/__(.+?)__/g, '_$1_')
+    .replace(/~~(.+?)~~/g, '~$1~')
+    .replace(/^ {0,3}#{1,6}\s+/gm, '')
+    .replace(/^[ \t]*[-*][ \t]+/gm, '• ')
 }
 
 async function getAvailableProducts(userId) {
@@ -189,6 +163,18 @@ async function sendText(ctx, chatId, text, options = {}) {
     }
     throw error
   }
+}
+
+/**
+ * Menu baru berarti mulai ulang alur: state lama harus dibersihkan supaya
+ * angka yang diketik pelanggan tidak diarahkan ke langkah sebelumnya.
+ */
+async function resetActiveOrder(ctx, userId, chatId) {
+  const current = await getOrder(userId, chatId)
+  if (current.state === ORDER_STATE.IDLE) return
+
+  await resetOrder(userId, chatId)
+  await sendText(ctx, chatId, '🔄 Order sebelumnya dibatalkan, silakan pilih ulang.')
 }
 
 async function sendProductList(ctx, userId, chatId) {
@@ -225,7 +211,7 @@ async function sendQuantityList(ctx, userId, chatId, product) {
   await sendText(
     ctx,
     chatId,
-    `📦 *Pilih Jumlah*\n\n${product.emoji || '🛍️'} ${singleLine(product.name)} — ${formatRupiah(product.price)}\n\n${lines.join('\n')}\n\nKetik angka 1–99 untuk jumlah.`,
+    `📦 *Pilih Jumlah*\n\n${safeEmoji(product.emoji)} ${safePlainText(product.name, 80)} — ${formatRupiah(product.price)}\n\n${lines.join('\n')}\n\nKetik angka 1–99 untuk jumlah.`,
   )
 }
 
@@ -242,7 +228,7 @@ async function sendConfirmationList(ctx, userId, chatId) {
   await sendText(
     ctx,
     chatId,
-    `📝 *Ringkasan Order*\n\n${selectedProduct.emoji || '🛍️'} ${selectedProduct.name}\n   ${quantity} x ${formatRupiah(selectedProduct.price)}\n━━━━━━━━━━━━━━━━━\n💵 *Total: ${formatRupiah(total)}*`,
+    `📝 *Ringkasan Order*\n\n${safeEmoji(selectedProduct.emoji)} ${safePlainText(selectedProduct.name, 80)}\n   ${quantity} x ${formatRupiah(selectedProduct.price)}\n━━━━━━━━━━━━━━━━━\n💵 *Total: ${formatRupiah(total)}*`,
   )
 
   await sendText(
@@ -319,7 +305,36 @@ async function confirmOrder(ctx, userId, chatId, { pushName, phone }) {
     return
   }
 
-  const { selectedProduct, quantity } = order
+  const quantity = order.quantity
+  const cachedProduct = order.selectedProduct
+
+  // Harga/ketersediaan di sesi chat bisa basi (TTL order 1 jam). Ambil ulang
+  // dari DB supaya total yang disimpan dan tagihan Midtrans selalu yang terbaru.
+  const product = await getProductById(userId, cachedProduct.id)
+  if (!product || !product.isAvailable) {
+    await resetOrder(userId, chatId)
+    await sendText(
+      ctx,
+      chatId,
+      '⚠️ Produk ini sedang tidak tersedia. Silakan pilih produk lain dengan /menu.',
+    )
+    return
+  }
+
+  if (product.price !== cachedProduct.price) {
+    await sendText(
+      ctx,
+      chatId,
+      `ℹ️ Harga ${safePlainText(product.name, 80)} berubah sejak ringkasan order: ${formatRupiah(cachedProduct.price)} → ${formatRupiah(product.price)}.`,
+    )
+  }
+
+  if (!phone) {
+    console.warn(
+      `[WhatsApp] Order user=${userId} dibuat tanpa nomor telepon (chat ${maskChatId(chatId)}); ` +
+        'identitas pembeli hanya berdasarkan JID.',
+    )
+  }
 
   await sendText(
     ctx,
@@ -327,13 +342,13 @@ async function confirmOrder(ctx, userId, chatId, { pushName, phone }) {
     '⏳ Memproses order dan membuat link pembayaran...',
   )
 
+  let savedOrderId = null
+  let invoiceText = null
+
   try {
     await assertMonthlyOrderLimit(userId, prisma)
 
-    await validateStock(
-      [{ productId: selectedProduct.id, quantity }],
-      userId,
-    )
+    await validateStock([{ productId: product.id, quantity }], userId)
 
     const savedOrder = await saveOrder({
       userId,
@@ -342,15 +357,16 @@ async function confirmOrder(ctx, userId, chatId, { pushName, phone }) {
       customerPhone: phone,
       customerName: pushName,
       firstName: pushName,
-      product: selectedProduct,
+      product,
       quantity,
     })
+    savedOrderId = savedOrder.orderId
 
     const snapResult = await createSnapTransaction({
       userId,
       orderId: savedOrder.orderId,
       totalPrice: savedOrder.totalPrice,
-      product: selectedProduct,
+      product,
       quantity,
       customer: { firstName: pushName, phone },
     })
@@ -362,14 +378,14 @@ async function confirmOrder(ctx, userId, chatId, { pushName, phone }) {
 
     await resetOrder(userId, chatId)
 
-    const total = selectedProduct.price * quantity
-    const invoice = `✅ *Order Berhasil Dibuat!*
+    const total = product.price * quantity
+    invoiceText = `✅ *Order Berhasil Dibuat!*
 
 📄 *Detail Order*
 ━━━━━━━━━━━━━━━━━━━━
 🔖 No. Order: *${savedOrder.orderId}*
-${selectedProduct.emoji || '🛍️'} ${selectedProduct.name}
-   ${quantity} x ${formatRupiah(selectedProduct.price)}
+${safeEmoji(product.emoji)} ${safePlainText(product.name, 80)}
+   ${quantity} x ${formatRupiah(product.price)}
 ━━━━━━━━━━━━━━━━━━━━
 💵 *Total: ${formatRupiah(total)}*
 ━━━━━━━━━━━━━━━━━━━━
@@ -381,10 +397,22 @@ Tersedia: QRIS, GoPay, ShopeePay, Transfer Bank
 ⏰ Link berlaku 24 jam
 
 Kamu akan otomatis mendapat notifikasi setelah pembayaran berhasil.`
-
-    await sendText(ctx, chatId, invoice, { linkPreview: true })
   } catch (error) {
     console.error('[WhatsApp confirmOrder]', error.message)
+
+    // Order sudah tersimpan tapi Midtrans gagal: tandai gagal dan bersihkan
+    // sesi, kalau tidak pelanggan bisa menekan /konfirmasi lagi dan membuat
+    // order duplikat untuk produk yang sama.
+    if (savedOrderId) {
+      await resetOrder(userId, chatId)
+      await updateOrderStatus(userId, savedOrderId, 'PAYMENT_FAILED').catch(
+        (markError) => {
+          console.error(
+            `[WhatsApp confirmOrder] Gagal menandai ${savedOrderId}: ${markError.message}`,
+          )
+        },
+      )
+    }
 
     const message =
       error.code === 'MONTHLY_ORDER_LIMIT_EXCEEDED'
@@ -394,6 +422,19 @@ Kamu akan otomatis mendapat notifikasi setelah pembayaran berhasil.`
           : '⚠️ Gagal membuat transaksi. Silakan coba lagi atau hubungi admin.'
 
     await sendText(ctx, chatId, message)
+  }
+
+  if (invoiceText) {
+    // Mengirim invoice bukan bagian dari pembuatan order. Kalau Evolution gagal
+    // mengirim, order tetap berlaku dan link pembayaran di notifikasi admin
+    // masih bisa dipakai — jangan sampai order yang bisa dibayar ditandai gagal.
+    try {
+      await sendText(ctx, chatId, invoiceText, { linkPreview: true })
+    } catch (sendError) {
+      console.error(
+        `[WhatsApp confirmOrder] Gagal mengirim invoice ${savedOrderId}: ${sendError.message}`,
+      )
+    }
   }
 }
 
@@ -426,14 +467,14 @@ async function sendOrderStatus(ctx, userId, chatId) {
 
   const stateLabel = {
     [ORDER_STATE.SELECTING_PRODUCT]: 'Memilih produk',
-    [ORDER_STATE.SELECTING_QTY]: `Memilih jumlah untuk: ${order.selectedProduct?.name || ''}`,
+    [ORDER_STATE.SELECTING_QTY]: `Memilih jumlah untuk: ${safePlainText(order.selectedProduct?.name, 80)}`,
     [ORDER_STATE.CONFIRMING]: 'Menunggu konfirmasi',
   }
 
   let text = `📋 *Status Order Kamu*\n\nStatus: ${stateLabel[order.state] || order.state}\n`
 
   if (order.selectedProduct) {
-    text += `Produk: ${order.selectedProduct.emoji || '🛍️'} ${order.selectedProduct.name}\n`
+    text += `Produk: ${safeEmoji(order.selectedProduct.emoji)} ${safePlainText(order.selectedProduct.name, 80)}\n`
     text += `Harga: ${formatRupiah(order.selectedProduct.price)}\n`
   }
 
@@ -467,55 +508,6 @@ Kamu juga bisa memilih produk langsung dari daftar yang muncul.`,
   )
 }
 
-async function handleSelection(ctx, userId, chatId, selectionId, context) {
-  const id = String(selectionId || '').trim()
-
-  if (id === 'confirm') {
-    await confirmOrder(ctx, userId, chatId, context)
-    return
-  }
-  if (id === 'cancel') {
-    await cancelOrder(ctx, userId, chatId)
-    return
-  }
-  if (id === 'menu') {
-    await sendProductList(ctx, userId, chatId)
-    return
-  }
-  if (id === 'status') {
-    await sendOrderStatus(ctx, userId, chatId)
-    return
-  }
-
-  if (id.startsWith('product:')) {
-    await selectProduct(ctx, userId, chatId, id.slice('product:'.length))
-    return
-  }
-
-  if (id.startsWith('qty:')) {
-    const value = id.slice('qty:'.length)
-    if (value === 'custom') {
-      const order = await getOrder(userId, chatId)
-      if (order.state !== ORDER_STATE.SELECTING_QTY || !order.selectedProduct) {
-        await sendText(
-          ctx,
-          chatId,
-          '⚠️ Sesi order tidak valid. Ketik /menu untuk memulai lagi.',
-        )
-        return
-      }
-      await setOrder(userId, chatId, { awaitingCustomQty: true })
-      await sendText(ctx, chatId, 'Ketik jumlah yang kamu inginkan (1–99):')
-      return
-    }
-
-    await selectQuantity(ctx, userId, chatId, Number.parseInt(value, 10))
-    return
-  }
-
-  await sendText(ctx, chatId, 'Aksi tidak dikenal. Ketik /menu untuk memulai.')
-}
-
 function matchProductByName(products, text) {
   const needle = String(text || '').trim().toLowerCase()
   if (needle.length < 3) return null
@@ -528,7 +520,7 @@ function matchProductByName(products, text) {
   )
 }
 
-async function handleStateInput(ctx, userId, chatId, text) {
+async function handleStateInput(ctx, userId, chatId, text, { aiEnabled }) {
   const order = await getOrder(userId, chatId)
   if (order.state === ORDER_STATE.IDLE) return false
 
@@ -559,6 +551,9 @@ async function handleStateInput(ctx, userId, chatId, text) {
       return true
     }
 
+    // Paritas Telegram: dalam mode AI teks bebas milik AI, bukan ditolak state.
+    if (aiEnabled) return false
+
     await sendText(
       ctx,
       chatId,
@@ -572,6 +567,8 @@ async function handleStateInput(ctx, userId, chatId, text) {
       await selectQuantity(ctx, userId, chatId, numeric)
       return true
     }
+
+    if (aiEnabled) return false
 
     if (order.awaitingCustomQty) {
       await sendText(
@@ -591,6 +588,8 @@ async function handleStateInput(ctx, userId, chatId, text) {
   }
 
   if (order.state === ORDER_STATE.CONFIRMING) {
+    if (aiEnabled) return false
+
     await sendText(
       ctx,
       chatId,
@@ -603,7 +602,7 @@ async function handleStateInput(ctx, userId, chatId, text) {
 }
 
 async function executeFunctionCall(ctx, userId, chatId, name, args, context) {
-  console.log(`[WhatsApp FunctionCall] userId=${userId} ${name}`, args)
+  console.log(`[WhatsApp FunctionCall] userId=${userId} ${name}`)
 
   switch (name) {
     case 'show_menu':
@@ -707,7 +706,9 @@ export async function handleIncomingWhatsAppMessage({ userId, chatId, data }) {
   const content = extractWhatsAppMessage(data)
   if (!content) return
 
-  const pushName = String(data?.pushName || 'Pelanggan').slice(0, 100)
+  // Nama profil dikontrol pelanggan dan bisa berisi markup/j markup newline;
+  // disanitasi sebelum disisipkan ke pesan atau disimpan sebagai nama pembeli.
+  const pushName = safePlainText(data?.pushName, 60, '') || 'Pelanggan'
   const phone = extractPhoneFromJid(chatId)
   const context = { pushName, phone }
 
@@ -720,17 +721,30 @@ export async function handleIncomingWhatsAppMessage({ userId, chatId, data }) {
     return
   }
 
-  if (content.kind === 'selection') {
-    await handleSelection(ctx, userId, chatId, content.id, context)
-    return
-  }
-
   const text = content.text
   const command = parseCommand(text)
 
   try {
     switch (command) {
-      case 'start':
+      case 'start': {
+        // WhatsApp mengirim "start" tiap kali chat dibuka lagi dari link
+        // click-to-chat; hindari greeting + daftar produk 100 baris berulang.
+        const freshWelcome = await redisSetNx(
+          `welcome_sent:${userId}:${chatId}`,
+          '1',
+          WELCOME_DEDUP_TTL_SECONDS,
+        ).catch(() => false)
+
+        if (!freshWelcome) {
+          await sendText(
+            ctx,
+            chatId,
+            '👋 Halo lagi! Ketik /menu untuk lihat produk atau /pesan untuk mulai order.',
+          )
+          return
+        }
+
+        await resetActiveOrder(ctx, userId, chatId)
         await sendText(
           ctx,
           chatId,
@@ -738,8 +752,10 @@ export async function handleIncomingWhatsAppMessage({ userId, chatId, data }) {
         )
         await sendProductList(ctx, userId, chatId)
         return
+      }
 
       case 'menu':
+        await resetActiveOrder(ctx, userId, chatId)
         await sendProductList(ctx, userId, chatId)
         return
 
@@ -783,15 +799,17 @@ export async function handleIncomingWhatsAppMessage({ userId, chatId, data }) {
         break
     }
 
+    const aiEnabled = await isAiEnabledForUser(userId)
+
     const handledByState = await handleStateInput(
       ctx,
       userId,
       chatId,
       text,
+      { aiEnabled },
     )
     if (handledByState) return
 
-    const aiEnabled = await isAiEnabledForUser(userId)
     if (!aiEnabled) {
       await sendProductList(ctx, userId, chatId)
       return
@@ -800,7 +818,7 @@ export async function handleIncomingWhatsAppMessage({ userId, chatId, data }) {
     await handleAiMessage(ctx, userId, chatId, text, context)
   } catch (error) {
     console.error(
-      `[WhatsApp] Gagal memproses pesan user=${userId} chat=${chatId}:`,
+      `[WhatsApp] Gagal memproses pesan user=${userId} chat=${maskChatId(chatId)}:`,
       error.message,
     )
 
