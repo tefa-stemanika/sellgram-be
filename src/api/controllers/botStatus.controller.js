@@ -1,4 +1,5 @@
 import { getBotObservabilityStatusForUser, restartBotForUser, configureTelegramWebhookForUser } from '../../services/botManager.js'
+import { getBotHealthForUser } from '../../services/botHealthService.js'
 import { reloadConfigForUser, getTelegramTokenForUser } from '../../services/configService.js'
 import { refreshTenantMap } from '../../services/tenantResolver.js'
 import { PLAN_LIMITS } from '../../services/planLimitService.js'
@@ -27,6 +28,21 @@ export async function getMyBotStatus(req, res, next) {
       },
       'Get bot status success',
     )
+  } catch (error) {
+    return next(error)
+  }
+}
+
+export async function getMyBotHealth(req, res, next) {
+  try {
+    const userId = req.auth.userId
+    const refresh = String(req.query.refresh || 'false') === 'true'
+    const baseUrl =
+      String(process.env.PUBLIC_BASE_URL || '').trim() || getPublicBaseUrl(req)
+
+    const result = await getBotHealthForUser(userId, { refresh, baseUrl })
+
+    return ok(res, result, 'Bot health retrieved')
   } catch (error) {
     return next(error)
   }

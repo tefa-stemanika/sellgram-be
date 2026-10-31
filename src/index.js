@@ -4,6 +4,7 @@ import { getRedisClient, redisQuit } from './services/redis.js'
 import { initializeTenantMap } from './services/tenantResolver.js'
 import { startWorkers, stopWorkers } from './services/workers.js'
 import { createSubscriptionWorker, scheduleSubscriptionJobs } from './workers/subscriptionWorker.js'
+import { startBotHealthMonitor, stopBotHealthMonitor } from './services/botHealthService.js'
 
 console.log('🚀 Telegram AI Bot — Multi-Tenant Mode (M6)\n')
 
@@ -51,6 +52,8 @@ const server = app.listen(port, () => {
   )
 })
 
+startBotHealthMonitor()
+
 setInterval(() => {
   const stats = getBotsStatistics()
   console.log(`📊 Active bots: ${stats.totalActiveBots}`)
@@ -58,6 +61,7 @@ setInterval(() => {
 
 async function shutdown(signal) {
   console.log(`\n⏹️  ${signal} diterima — shutdown...`)
+  stopBotHealthMonitor()
   server.close()
   await stopWorkers()
   await subscriptionWorker.close()

@@ -277,6 +277,40 @@ curl -X POST http://localhost:3000/api/bots/restart \
   -H "Authorization: Bearer <token>"
 ```
 
+### GET /api/bots/health
+
+Cek kesehatan bot: validitas token (`getMe`), status webhook (`getWebhookInfo`), runtime, dan aktivitas update terakhir. Hasil di-cache 60 detik; tambahkan `?refresh=true` untuk cek live.
+
+```bash
+curl -X GET "http://localhost:3000/api/bots/health?refresh=true" \
+  -H "Authorization: Bearer <token>"
+```
+
+```json
+{
+  "success": true,
+  "message": "Bot health retrieved",
+  "data": {
+    "userId": "uuid",
+    "status": "healthy",
+    "cached": false,
+    "checkedAt": "2026-10-30T10:00:00.000Z",
+    "cacheTtlSeconds": 60,
+    "checks": {
+      "token": { "status": "ok", "botId": 123, "username": "toko_bot", "firstName": "Toko", "error": null },
+      "webhook": { "status": "ok", "url": "https://app.example.com/api/webhook/telegram/uuid", "expectedUrl": "https://app.example.com/api/webhook/telegram/uuid", "pendingUpdateCount": 0, "lastErrorAt": null, "lastErrorMessage": null, "error": null },
+      "runtime": { "active": true },
+      "activity": { "lastUpdateAt": "2026-10-30T09:58:12.000Z" }
+    },
+    "issues": []
+  }
+}
+```
+
+`status`: `healthy` | `degraded` (ada warning) | `unhealthy` (masalah kritis) | `unknown` (Telegram tidak dapat dihubungi). Kode issue kritis: `TOKEN_MISSING`, `TOKEN_INVALID`, `WEBHOOK_URL_MISSING`, `WEBHOOK_URL_INVALID`, `WEBHOOK_URL_MISMATCH`. Warning: `TELEGRAM_API_UNREACHABLE`, `CONFIG_UNAVAILABLE`, `WEBHOOK_LAST_ERROR_RECENT`, `WEBHOOK_PENDING_BACKLOG`, `WEBHOOK_CHECK_FAILED`, `BOT_NOT_SPAWNED`.
+
+Monitor background berjalan tiap `BOT_HEALTH_MONITOR_INTERVAL_MS` (default 5 menit, `<= 0` untuk mematikan) dan mencatat peringatan `[BotHealth]` di log saat status bot berubah.
+
 ---
 
 ## Public API (No Auth)

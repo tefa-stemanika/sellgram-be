@@ -47,6 +47,7 @@ const activeBots = new Map()
  *   tokenStatus: 'unknown' | 'missing' | 'valid' | 'invalid',
  *   lastSpawnAttemptAt: string | null,
  *   lastSpawnAttemptSuccess: boolean | null,
+ *   lastUpdateAt: string | null,
  *   reason: string | null,
  *   updatedAt: string
  * }>
@@ -63,6 +64,7 @@ function getDefaultObservabilityState() {
     tokenStatus: 'unknown',
     lastSpawnAttemptAt: null,
     lastSpawnAttemptSuccess: null,
+    lastUpdateAt: null,
     reason: 'Belum ada percobaan spawn.',
     updatedAt: toIsoNow(),
   }
@@ -109,7 +111,7 @@ function getRetryDelayMs(attemptIndex, delays) {
   return delays[attemptIndex] ?? fallback
 }
 
-async function callTelegramApi(token, method, payload) {
+export async function callTelegramApi(token, method, payload) {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), TELEGRAM_API_TIMEOUT_MS)
 
@@ -655,6 +657,10 @@ export function getActiveBots() {
   return activeBots
 }
 
+export function getBotObservabilitySnapshot(userId) {
+  return { ...getOrInitObservability(userId) }
+}
+
 export async function getBotObservabilityStatusForUser(
   userId,
   options = { validateToken: true },
@@ -700,6 +706,8 @@ export async function processTelegramWebhookUpdateForUser(userId, update) {
   if (!telegramId) {
     return { success: false, reason: 'No telegramId in update.' }
   }
+
+  setObservability(userId, { lastUpdateAt: toIsoNow() })
 
   const queueKey = `webhook_queue:${userId}:${telegramId}`
   await redisLpush(queueKey, update)

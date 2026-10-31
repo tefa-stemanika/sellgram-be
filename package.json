@@ -20,6 +20,7 @@
     "test:webhook": "node tests/webhook-tests.js",
     "test:load": "node tests/load-tests.js",
     "test:fulfillment": "node tests/fulfillment-tests.js",
+    "test:bot-health": "node tests/bot-health-tests.js",
     "test:phase5": "npm run test:integration && npm run test:webhook && npm run test:load"
   },
   "prisma": {
