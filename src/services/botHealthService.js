@@ -5,6 +5,10 @@ import {
   getBotObservabilitySnapshot,
 } from './botManager.js'
 import { loadConfigForUser, getTelegramTokenForUser } from './configService.js'
+import {
+  getWhatsAppConfiguredUserIds,
+  getWhatsAppStatusForUser,
+} from './whatsappManager.js'
 import { redisGet, redisSet } from './redis.js'
 
 const PENDING_BACKLOG_LIMIT = 50
@@ -152,6 +156,59 @@ async function checkWebhook({ token, userId, baseUrl, checks, issues }) {
   }
 }
 
+async function checkWhatsApp({ userId, baseUrl, checks, issues }) {
+  const status = await getWhatsAppStatusForUser(userId, { publicBaseUrl: baseUrl })
+
+  if (!status.configured) {
+    checks.whatsapp.status = 'not_configured'
+    return
+  }
+
+  checks.whatsapp.instance = status.instance ?? null
+  checks.whatsapp.instanceExists = status.instanceExists ?? null
+  checks.whatsapp.state = status.state ?? null
+  checks.whatsapp.connected = Boolean(status.connected)
+  checks.whatsapp.webhookSynced = status.webhook
+    ? Boolean(status.webhook.synced)
+    : null
+
+  if (status.instanceExists === false) {
+    // Tenant yang belum pernah membuat instance memang belum pakai WhatsApp.
+    checks.whatsapp.status = 'not_configured'
+    return
+  }
+
+  if (status.errors?.length) {
+    checks.whatsapp.status = 'error'
+    checks.whatsapp.error = status.errors.join('; ')
+    issues.push({
+      code: 'WHATSAPP_CHECK_FAILED',
+      severity: 'warning',
+      message: `Tidak dapat memeriksa WhatsApp: ${checks.whatsapp.error}`,
+    })
+    return
+  }
+
+  checks.whatsapp.status = status.connected ? 'ok' : 'disconnected'
+
+  if (!status.connected) {
+    issues.push({
+      code: 'WHATSAPP_NOT_CONNECTED',
+      severity: 'warning',
+      message: `Instance "${checks.whatsapp.instance}" belum terhubung ke WhatsApp (state: ${checks.whatsapp.state || 'tidak diketahui'}).`,
+    })
+  }
+
+  if (checks.whatsapp.webhookSynced === false && status.webhook?.expectedUrl) {
+    issues.push({
+      code: 'WHATSAPP_WEBHOOK_NOT_SYNCED',
+      severity: 'critical',
+      message:
+        'Webhook Evolution belum menunjuk ke endpoint tenant — pesan WhatsApp tidak akan diproses.',
+    })
+  }
+}
+
 export async function checkBotHealthForUser(userId, options = {}) {
   const baseUrl = normalizeBaseUrl(options.baseUrl)
   const checkedAt = new Date().toISOString()
@@ -176,6 +233,15 @@ export async function checkBotHealthForUser(userId, options = {}) {
     },
     runtime: { active: false },
     activity: { lastUpdateAt: null },
+    whatsapp: {
+      status: 'skipped',
+      instance: null,
+      instanceExists: null,
+      state: null,
+      connected: false,
+      webhookSynced: null,
+      error: null,
+    },
   }
 
   let token = null
@@ -253,6 +319,18 @@ export async function checkBotHealthForUser(userId, options = {}) {
       code: 'BOT_NOT_SPAWNED',
       severity: 'warning',
       message: 'Token valid tetapi bot tidak berjalan di proses ini.',
+    })
+  }
+
+  try {
+    await checkWhatsApp({ userId, baseUrl, checks, issues })
+  } catch (err) {
+    checks.whatsapp.status = 'error'
+    checks.whatsapp.error = err.message
+    issues.push({
+      code: 'WHATSAPP_CHECK_FAILED',
+      severity: 'warning',
+      message: `Tidak dapat memeriksa WhatsApp: ${err.message}`,
     })
   }
 
@@ -358,7 +436,12 @@ async function runHealthMonitorCycle() {
   }
 
   try {
-    const userIds = Array.from(getActiveBots().keys())
+    const userIds = new Set(Array.from(getActiveBots().keys()))
+    try {
+      for (const id of await getWhatsAppConfiguredUserIds()) userIds.add(id)
+    } catch (err) {
+      console.warn(`[BotHealth] gagal daftar user WhatsApp: ${err.message}`)
+    }
     const baseUrl = String(process.env.PUBLIC_BASE_URL || '').trim() || null
 
     for (const userId of userIds) {

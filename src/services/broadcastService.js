@@ -8,6 +8,11 @@ const ALLOWED_SORT = ['createdAt', 'name', 'status', 'totalCustomers', 'sentCoun
 
 const ALLOWED_FILTER_KEYS = ['search', 'hasTelegram', 'hasWhatsapp', 'hasEmail', 'totalSpentMin', 'totalSpentMax', 'source']
 
+// Nilai enum yang boleh masuk query Prisma; filter tersimpan bisa berisi nilai
+// basi dan Prisma melempar error 500 untuk nilai yang tidak dikenal.
+const CUSTOMER_SOURCES = ['ORDER', 'MANUAL', 'IMPORT']
+const BROADCAST_STATUSES = ['DRAFT', 'SCHEDULED', 'SENDING', 'SENT', 'PAUSED', 'FAILED']
+
 const PER_BROADCAST_RECIPIENT_LIMITS = {
   FREE: 0,
   STARTER: 1000,
@@ -29,6 +34,22 @@ function validateFilters(filters) {
   }
 }
 
+const SUPPORTED_BROADCAST_CHANNELS = ['TELEGRAM']
+
+// Broadcast WhatsApp butuh opt-in pelanggan + risiko banned nomor; belum
+// diimplementasikan. Ditolak di muka supaya tenant tidak menjalankan kampanye
+// yang 100% recipient-nya gagal.
+function assertSupportedChannel(channel) {
+  const value = channel || 'TELEGRAM'
+  if (SUPPORTED_BROADCAST_CHANNELS.includes(value)) return
+  throw Object.assign(
+    new Error(
+      `Broadcast lewat ${value} belum didukung. Kanal yang tersedia: ${SUPPORTED_BROADCAST_CHANNELS.join(', ')}.`,
+    ),
+    { statusCode: 400, code: 'channel_not_supported' },
+  )
+}
+
 function buildCustomerWhere(userId, filters) {
   if (!filters) return { userId }
   const { search, hasTelegram, hasWhatsapp, hasEmail, totalSpentMin, totalSpentMax, source } = filters
@@ -37,7 +58,7 @@ function buildCustomerWhere(userId, filters) {
     ...(hasTelegram === 'true' ? { hasTelegram: true } : hasTelegram === 'false' ? { hasTelegram: false } : {}),
     ...(hasWhatsapp === 'true' ? { hasWhatsapp: true } : hasWhatsapp === 'false' ? { hasWhatsapp: false } : {}),
     ...(hasEmail === 'true' ? { hasEmail: true } : hasEmail === 'false' ? { hasEmail: false } : {}),
-    ...(source ? { source } : {}),
+    ...(CUSTOMER_SOURCES.includes(source) ? { source } : {}),
     ...(totalSpentMin !== undefined && totalSpentMin !== '' ? { totalSpent: { gte: Number(totalSpentMin) } } : {}),
     ...(totalSpentMax !== undefined && totalSpentMax !== '' ? { totalSpent: { lte: Number(totalSpentMax) } } : {}),
     ...(search ? {
@@ -53,7 +74,7 @@ function buildCustomerWhere(userId, filters) {
 
 export async function getBroadcasts(userId, filters = {}) {
   const { page = 1, limit = 20, status } = filters
-  const where = { userId, ...(status ? { status } : {}) }
+  const where = { userId, ...(BROADCAST_STATUSES.includes(status) ? { status } : {}) }
   const safeSortBy = ALLOWED_SORT.includes(filters.sortBy) ? filters.sortBy : 'createdAt'
   const safeSortDir = filters.sortDir === 'asc' ? 'asc' : 'desc'
 
@@ -91,6 +112,8 @@ export async function createBroadcast(userId, data) {
   const { name, message, channel, filters, scheduledAt } = data
   if (!name || !message) throw Object.assign(new Error('name dan message wajib diisi'), { statusCode: 400 })
 
+  assertSupportedChannel(channel)
+
   validateFilters(filters)
 
   const preview = await previewCustomers(userId, filters)
@@ -121,6 +144,9 @@ export async function createBroadcast(userId, data) {
 export async function createBroadcastFromTemplate(userId, data) {
   const { name, templateId, channel, filters, scheduledAt, mappings } = data
   if (!name || !templateId) throw Object.assign(new Error('name dan templateId wajib diisi'), { statusCode: 400 })
+
+  assertSupportedChannel(channel)
+
   if (!Array.isArray(mappings) || mappings.length === 0) {
     throw Object.assign(new Error('mappings wajib diisi'), { statusCode: 400 })
   }
@@ -197,6 +223,7 @@ export async function updateBroadcast(broadcastId, userId, data) {
 
   const { name, message, channel, filters, scheduledAt } = data
   if (filters !== undefined) validateFilters(filters)
+  if (channel !== undefined) assertSupportedChannel(channel)
 
   const updateData = {}
   if (name !== undefined) updateData.name = name
@@ -312,9 +339,9 @@ export async function startBroadcast(broadcastId, userId) {
     await prisma.broadcast.update({ where: { id: broadcastId }, data: { status: 'DRAFT' } }).catch(() => {})
   }
 
-  if (broadcast.status !== 'SCHEDULED') {
-    await assertMonthlyBroadcastLimit(userId, prisma)
-  }
+  await assertMonthlyBroadcastLimit(userId, prisma)
+
+  assertSupportedChannel(broadcast.channel)
 
   if (broadcast.channel === 'TELEGRAM') {
     const bot = getBotForUser(userId)
@@ -322,7 +349,8 @@ export async function startBroadcast(broadcastId, userId) {
   }
 
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { plan: true } })
-  const maxRecipients = PER_BROADCAST_RECIPIENT_LIMITS[user?.plan || 'FREE']
+  const userPlan = user?.plan || 'FREE'
+  const maxRecipients = PER_BROADCAST_RECIPIENT_LIMITS[userPlan]
 
   let filters = broadcast.filters || {}
   if (broadcast.channel === 'TELEGRAM' && filters.hasTelegram === undefined) {
@@ -335,7 +363,7 @@ export async function startBroadcast(broadcastId, userId) {
 
   if (totalMatching > maxRecipients) {
     throw Object.assign(
-      new Error(`Plan ${user.plan} maksimal ${maxRecipients} penerima per broadcast. ${totalMatching} customer cocok. Persempit filter.`),
+      new Error(`Plan ${userPlan} maksimal ${maxRecipients} penerima per broadcast. ${totalMatching} customer cocok. Persempit filter.`),
       { statusCode: 400 }
     )
   }
@@ -562,7 +590,6 @@ export async function processSingleRecipient(broadcastId, userId, customerId, ch
         failureType: 'VALIDATION',
       },
     })
-    const failed = validationErrors.length
     await prisma.broadcast.update({
       where: { id: broadcastId },
       data: { failedCount: { increment: 1 } },

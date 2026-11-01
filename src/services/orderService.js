@@ -1,18 +1,23 @@
 // src/services/orderService.js
 // Multi-tenant: semua operasi order memerlukan userId.
 
+import { randomBytes } from 'node:crypto'
 import prisma from './db.js'
 
+// `Order.orderId` hanya unik per tenant (@@unique([userId, orderId])), sedangkan
+// webhook Midtrans mencari order lewat orderId saja. Entri acak 4 digit punya
+// ~9000 nilai/hari secara global, jadi dua tenant bisa bertabrakan dan pembayaran
+// tenant A akan menerapkan status ke order tenant B.
 export function generateOrderId() {
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, '')
-  const rand = Math.floor(1000 + Math.random() * 9000)
-  return `ORD-${date}-${rand}`
+  return `ORD-${date}-${randomBytes(5).toString('hex').toUpperCase()}`
 }
 
 /**
  * Simpan order baru ke database dengan status PAYMENT_PENDING.
  * paymentUrl dan qrString diisi setelah transaksi Midtrans dibuat.
  * Untuk order dari website (source=WEBSITE), telegramId bersifat opsional.
+ * Untuk order WhatsApp (source=WHATSAPP), whatsappId berisi JID/nomor tujuan.
  */
 export async function saveOrder({
   userId,
@@ -24,6 +29,7 @@ export async function saveOrder({
   source = 'TELEGRAM',
   customerName,
   customerPhone,
+  whatsappId,
 }) {
   const orderId = generateOrderId()
   const totalPrice = product.price * quantity
@@ -34,6 +40,7 @@ export async function saveOrder({
       orderId,
       source,
       telegramId: telegramId ? BigInt(telegramId) : null,
+      whatsappId: whatsappId || null,
       username: username || null,
       firstName: firstName || null,
       customerName: customerName || null,

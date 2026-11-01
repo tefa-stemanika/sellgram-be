@@ -136,6 +136,7 @@ model Product {
 enum OrderSource {
   TELEGRAM
   WEBSITE
+  WHATSAPP
 }
 
 model Order {
@@ -144,6 +145,7 @@ model Order {
   orderId         String      @map("order_id") @db.VarChar(30)
   source          OrderSource @default(TELEGRAM)
   telegramId      BigInt?     @map("telegram_id")
+  whatsappId      String?     @map("whatsapp_id") @db.VarChar(100)
   username        String?     @db.VarChar(100)
   firstName       String?     @map("first_name") @db.VarChar(100)
   customerName    String?     @map("customer_name") @db.VarChar(100)

@@ -92,11 +92,13 @@ export async function listSlots(req, res) {
     include: {
       order: {
         select: {
+          source: true,
           firstName: true,
           customerName: true,
           customerPhone: true,
           username: true,
           telegramId: true,
+          whatsappId: true,
           customer: {
             select: { name: true, phone: true, email: true },
           },

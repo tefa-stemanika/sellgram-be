@@ -3,6 +3,8 @@
 
 import TelegramBot from 'node-telegram-bot-api'
 import { formatRupiah } from './productService.js'
+import { extractPhoneFromJid } from './whatsappJid.js'
+import { safeEmoji, safePlainText } from './safeText.js'
 import {
   getAdminBotTokenForUser,
   getAdminChatIdForUser,
@@ -107,7 +109,7 @@ export async function notifyAdminOrderSuccessForUser(
 ━━━━━━━━━━━━━━━━━━━━
 ${
   item
-    ? `${item.product.emoji} *${item.product.name}*
+    ? `${safeEmoji(item.product.emoji, '')} *${safePlainText(item.product.name)}*
    Jumlah: ${item.quantity} pcs
    Harga satuan: ${formatRupiah(item.unitPrice)}`
     : ''
@@ -116,9 +118,7 @@ ${
 💵 *Total: ${formatRupiah(order.totalPrice)}*
 ━━━━━━━━━━━━━━━━━━━━
 👤 *Data Pembeli*
-Nama: ${order.firstName || '-'}
-Username: ${order.username ? `@${order.username}` : '-'}
-Telegram ID: \`${order.telegramId}\`
+${buildBuyerIdentity(order)}
 ━━━━━━━━━━━━━━━━━━━━
 
 Segera proses pesanan ini! 🚀`
@@ -159,9 +159,9 @@ export async function notifyAdminOrderFailedForUser(userId, order) {
   const text = `⚠️ *Pembayaran Gagal/Expired*
 
 🔖 Order: \`${order.orderId}\`
-${item ? `${item.product.emoji} ${item.product.name} x${item.quantity}` : ''}
+${item ? `${safeEmoji(item.product.emoji, '')} ${safePlainText(item.product.name)} x${item.quantity}` : ''}
 💵 Total: ${formatRupiah(order.totalPrice)}
-👤 ${order.firstName || '-'} ${order.username ? `(@${order.username})` : ''}
+👤 ${buildBuyerLabel(order)}
 
 Tidak perlu diproses.`
 
@@ -205,6 +205,54 @@ export async function sendAdminBotMessage(userId, text) {
   } catch (err) {
     console.error(`[AdminBot] Gagal kirim message (user ${userId}):`, err.message)
   }
+}
+
+function resolveBuyerPhone(order) {
+  const direct = String(order.customerPhone || '').replace(/\D/g, '')
+  if (direct) return direct
+  return extractPhoneFromJid(order.whatsappId)
+}
+
+function formatBuyerPhone(phone) {
+  return phone ? `+${phone}` : '-'
+}
+
+function buyerName(order) {
+  return safePlainText(order.customerName || order.firstName || order.customer?.name)
+}
+
+/**
+ * Identitas pembeli mengikuti kanal order: order Telegram punya Telegram ID,
+ * order WhatsApp/Website ditampilkan dengan nomor HP agar tidak muncul "null".
+ */
+export function buildBuyerIdentity(order) {
+  if (order.source === 'TELEGRAM') {
+    return [
+      `Nama: ${buyerName(order)}`,
+      `Username: ${order.username ? `@${safePlainText(order.username, 40)}` : '-'}`,
+      `Telegram ID: \`${order.telegramId ?? '-'}\``,
+    ].join('\n')
+  }
+
+  const channel = order.source === 'WHATSAPP' ? 'WhatsApp' : 'Website'
+  const lines = [
+    `Nama: ${buyerName(order)}`,
+    `Sumber: ${channel}`,
+    `No. HP: ${formatBuyerPhone(resolveBuyerPhone(order))}`,
+  ]
+  if (order.username) lines.push(`Username: @${safePlainText(order.username, 40)}`)
+  if (order.customer?.email) lines.push(`Email: ${safePlainText(order.customer.email)}`)
+  return lines.join('\n')
+}
+
+export function buildBuyerLabel(order) {
+  const name = buyerName(order)
+  if (order.source === 'TELEGRAM') {
+    return `${name} ${order.username ? `(@${order.username})` : ''}`.trim()
+  }
+  const channel = order.source === 'WHATSAPP' ? 'WhatsApp' : 'Website'
+  const phone = resolveBuyerPhone(order)
+  return `${name} (${channel}${phone ? ` ${formatBuyerPhone(phone)}` : ''})`
 }
 
 function formatPaymentMethod(paymentType) {

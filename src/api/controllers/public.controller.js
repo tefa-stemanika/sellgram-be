@@ -10,7 +10,7 @@ import {
   isPaymentSuccess,
   isPaymentFailed,
 } from '../../services/midtrans.js'
-import { notifQueue } from '../../services/queue.js'
+import { settlePayment } from '../../services/paymentSettlement.js'
 import { ok, okPaginated, fail } from '../utils/response.js'
 import { assertMonthlyOrderLimit } from '../../services/planLimitService.js'
 
@@ -221,54 +221,112 @@ export async function verifyPayment(req, res, next) {
       return fail(res, 'Missing orderId', 400)
     }
 
-    const order = await prisma.order.findFirst({
+    // `orderId` hanya unik di dalam satu tenant, jadi endpoint publik ini bisa
+    // melihat beberapa order sekaligus. Tiap tenant punya server key sendiri,
+    // jadi status transaksi ditanyakan per kandidat dan yang menjawab
+    // "berhasil/lunas" yang dipakai.
+    const candidates = await prisma.order.findMany({
       where: { orderId },
+      select: {
+        id: true,
+        userId: true,
+        orderId: true,
+        status: true,
+        paidAt: true,
+      },
     })
 
-    if (!order) {
+    if (candidates.length === 0) {
       return fail(res, 'Order not found', 404)
     }
 
-    if (order.status === 'COMPLETED') {
-      return ok(res, { status: order.status, paidAt: order.paidAt }, 'Payment already completed')
+    let finalOrder = null
+    let failedOrder = null
+    let failedNotification = null
+
+    for (const order of candidates) {
+      if (order.status === 'COMPLETED' || order.status === 'PAYMENT_FAILED') {
+        if (!finalOrder) finalOrder = order
+        continue
+      }
+
+      let notification = null
+      try {
+        notification = await checkTransactionStatus(order.userId, orderId)
+      } catch {
+        // Transaksi tidak ada di akun Midtrans tenant ini (kolisi orderId).
+        continue
+      }
+
+      if (isPaymentSuccess(notification)) {
+        const outcome = await settlePayment({
+          orderRowId: order.id,
+          fromStatus: order.status,
+          guard: { status: { not: 'COMPLETED' } },
+          data: { status: 'COMPLETED', paidAt: new Date() },
+          jobName: 'payment-success',
+          jobData: {
+            userId: order.userId,
+            orderId: order.orderId,
+            notification,
+          },
+        })
+
+        if (outcome.result === 'queue_error') {
+          console.error(
+            '[Public] Gagal antrekan notifikasi pembayaran:',
+            outcome.error.message,
+          )
+          return fail(res, 'Notification queue unavailable', 500)
+        }
+        if (outcome.result === 'db_error') {
+          return next(outcome.error)
+        }
+
+        return ok(res, { status: 'COMPLETED' }, 'Payment verified successfully')
+      }
+
+      if (isPaymentFailed(notification) && !failedOrder) {
+        failedOrder = order
+        failedNotification = notification
+      }
     }
 
-    if (order.status === 'PAYMENT_FAILED') {
-      return ok(res, { status: order.status }, 'Payment already failed')
-    }
-
-    const notification = await checkTransactionStatus(order.userId, orderId)
-
-    if (isPaymentSuccess(notification)) {
-      await prisma.order.update({
-        where: { id: order.id },
-        data: { status: 'COMPLETED', paidAt: new Date() },
-      })
-
-      await notifQueue.add('payment-success', {
-        userId: order.userId,
-        orderId: order.orderId,
-        notification,
-      })
-
-      return ok(res, { status: 'COMPLETED' }, 'Payment verified successfully')
-    }
-
-    if (isPaymentFailed(notification)) {
-      await prisma.order.update({
-        where: { id: order.id },
+    if (failedOrder) {
+      const outcome = await settlePayment({
+        orderRowId: failedOrder.id,
+        fromStatus: failedOrder.status,
+        guard: { status: { notIn: ['PAYMENT_FAILED', 'COMPLETED'] } },
         data: { status: 'PAYMENT_FAILED' },
+        jobName: 'payment-failed',
+        jobData: { userId: failedOrder.userId, orderId: failedOrder.orderId },
       })
 
-      await notifQueue.add('payment-failed', {
-        userId: order.userId,
-        orderId: order.orderId,
-      })
+      if (outcome.result === 'queue_error') {
+        console.error(
+          '[Public] Gagal antrekan notifikasi pembayaran:',
+          outcome.error.message,
+        )
+        return fail(res, 'Notification queue unavailable', 500)
+      }
+      if (outcome.result === 'db_error') {
+        return next(outcome.error)
+      }
 
       return ok(res, { status: 'PAYMENT_FAILED' }, 'Payment failed')
     }
 
-    return ok(res, { status: order.status }, 'Payment still pending')
+    if (finalOrder) {
+      return ok(
+        res,
+        { status: finalOrder.status, paidAt: finalOrder.paidAt },
+        finalOrder.status === 'COMPLETED'
+          ? 'Payment already completed'
+          : 'Payment already failed',
+      )
+    }
+
+    return ok(res, { status: candidates[0].status }, 'Payment still pending')
   } catch (error) {
     return next(error)
   }

@@ -42,10 +42,3 @@ export async function getOrderStats() {
     expired: 0,
   }
 }
-
-export function generateOrderId() {
-  const now = new Date()
-  const date = now.toISOString().slice(0, 10).replace(/-/g, '')
-  const rand = Math.floor(1000 + Math.random() * 9000)
-  return `ORD-${date}-${rand}`
-}

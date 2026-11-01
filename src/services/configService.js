@@ -1,5 +1,5 @@
 import prisma from './db.js'
-import { decrypt } from '../utils/encryption.js'
+import { decrypt, encrypt } from '../utils/encryption.js'
 import { redisGet, redisSet, redisDel, redisKeys } from './redis.js'
 
 const CONFIG_CACHE_TTL = 600
@@ -58,6 +58,28 @@ export async function loadCredsForUser(userId) {
 export async function reloadConfigForUser(userId) {
   await redisDel(`tenant_config:${userId}`)
   return loadConfigForUser(userId)
+}
+
+/**
+ * Simpan/ubah satu credential tenant (terenkripsi) dan invalidasi cache.
+ * Dipakai untuk kredensial yang diisi/diubah saat runtime.
+ */
+export async function setCredentialForUser(userId, key, value) {
+  const normalizedKey = String(key || '').trim().toUpperCase()
+  if (!normalizedKey) throw new Error('Credential key wajib diisi.')
+
+  const encryptedValue =
+    value === null || value === undefined || value === ''
+      ? null
+      : encrypt(String(value))
+
+  await prisma.botCredential.upsert({
+    where: { userId_key: { userId, key: normalizedKey } },
+    create: { userId, key: normalizedKey, value: encryptedValue },
+    update: { value: encryptedValue },
+  })
+
+  await redisDel(`tenant_config:${userId}`)
 }
 
 export async function reloadAllConfigs() {

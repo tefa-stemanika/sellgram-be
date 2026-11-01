@@ -1,5 +1,12 @@
 import { getBotObservabilityStatusForUser, restartBotForUser, configureTelegramWebhookForUser } from '../../services/botManager.js'
 import { getBotHealthForUser } from '../../services/botHealthService.js'
+import {
+  getWhatsAppStatusForUser,
+  reconnectWhatsAppForUser,
+  createWhatsAppInstanceForUser,
+  connectWhatsAppForUser,
+  restartWhatsAppForUser,
+} from '../../services/whatsappManager.js'
 import { reloadConfigForUser, getTelegramTokenForUser } from '../../services/configService.js'
 import { refreshTenantMap } from '../../services/tenantResolver.js'
 import { PLAN_LIMITS } from '../../services/planLimitService.js'
@@ -89,6 +96,160 @@ export async function reconnectBot(req, res, next) {
     }
 
     return ok(res, { userId, webhookUrl: `${publicBaseUrl}/api/webhook/telegram/${userId}` }, 'Bot berhasil direconnect')
+  } catch (error) {
+    return next(error)
+  }
+}
+
+export async function getMyWhatsAppStatus(req, res, next) {
+  try {
+    const userId = req.auth.userId
+    const status = await getWhatsAppStatusForUser(userId, {
+      publicBaseUrl: resolvePublicBaseUrl(req),
+    })
+    return ok(res, { userId, ...status }, 'Get WhatsApp status success')
+  } catch (error) {
+    return next(error)
+  }
+}
+
+export async function reconnectWhatsApp(req, res, next) {
+  try {
+    const userId = req.auth.userId
+    const publicBaseUrl =
+      String(process.env.PUBLIC_BASE_URL || '').trim() || getPublicBaseUrl(req)
+
+    if (!publicBaseUrl) {
+      return res
+        .status(400)
+        .json({ success: false, message: 'PUBLIC_BASE_URL tidak dapat ditentukan.' })
+    }
+
+    const result = await reconnectWhatsAppForUser(userId, publicBaseUrl)
+
+    if (!result.success) {
+      return res.status(whatsAppErrorStatus(result)).json({
+        success: false,
+        code: result.code || null,
+        message: result.reason || 'Gagal konfigurasi WhatsApp.',
+      })
+    }
+
+    return ok(res, { userId, ...result }, 'WhatsApp berhasil direconnect')
+  } catch (error) {
+    return next(error)
+  }
+}
+
+function whatsAppErrorStatus(result) {
+  switch (result?.code) {
+    case 'instance_missing':
+      return 404
+    case 'instance_limit_reached':
+      return 409
+    case 'webhook_secret_missing':
+      return 500
+    case 'server_unreachable':
+    case 'create_failed':
+    case 'connect_failed':
+    case 'restart_failed':
+    case 'webhook_failed':
+      return result.transient ? 503 : 502
+    default:
+      return 400
+  }
+}
+
+function resolvePublicBaseUrl(req) {
+  return String(process.env.PUBLIC_BASE_URL || '').trim() || getPublicBaseUrl(req)
+}
+
+export async function createMyWhatsAppInstance(req, res, next) {
+  try {
+    const userId = req.auth.userId
+    const publicBaseUrl = resolvePublicBaseUrl(req)
+
+    const result = await createWhatsAppInstanceForUser(userId, {
+      publicBaseUrl,
+      number: req.body?.number,
+    })
+
+    if (!result.success) {
+      return res.status(whatsAppErrorStatus(result)).json({
+        success: false,
+        code: result.code || null,
+        message: result.reason || 'Gagal membuat instance WhatsApp.',
+        instance: result.instance || null,
+      })
+    }
+
+    return ok(
+      res,
+      { userId, ...result },
+      result.created
+        ? 'Instance WhatsApp berhasil dibuat'
+        : 'Instance WhatsApp sudah tersedia',
+      result.created ? 201 : 200,
+    )
+  } catch (error) {
+    return next(error)
+  }
+}
+
+export async function connectMyWhatsApp(req, res, next) {
+  try {
+    const userId = req.auth.userId
+    const number = req.query?.number ?? req.body?.number
+
+    const result = await connectWhatsAppForUser(userId, {
+      number,
+      publicBaseUrl: resolvePublicBaseUrl(req),
+    })
+
+    if (!result.success) {
+      return res.status(whatsAppErrorStatus(result)).json({
+        success: false,
+        code: result.code || null,
+        message: result.reason || 'Gagal mengambil QR WhatsApp.',
+        instance: result.instance || null,
+      })
+    }
+
+    return ok(
+      res,
+      { userId, ...result },
+      result.connected
+        ? 'WhatsApp sudah terhubung'
+        : 'QR WhatsApp berhasil dibuat, silakan scan',
+    )
+  } catch (error) {
+    return next(error)
+  }
+}
+
+export async function restartWhatsApp(req, res, next) {
+  try {
+    const userId = req.auth.userId
+    const publicBaseUrl = resolvePublicBaseUrl(req)
+
+    if (!publicBaseUrl) {
+      return res
+        .status(400)
+        .json({ success: false, message: 'PUBLIC_BASE_URL tidak dapat ditentukan.' })
+    }
+
+    const result = await restartWhatsAppForUser(userId, publicBaseUrl)
+
+    if (!result.success) {
+      return res.status(whatsAppErrorStatus(result)).json({
+        success: false,
+        code: result.code || null,
+        message: result.reason || 'Gagal restart WhatsApp.',
+        instance: result.instance || null,
+      })
+    }
+
+    return ok(res, { userId, ...result }, 'WhatsApp berhasil direstart')
   } catch (error) {
     return next(error)
   }

@@ -29,8 +29,10 @@ export async function getDashboard(req, res, next) {
       prevRevenue,
       recentOrders,
       telegramOrders,
+      whatsappOrders,
       websiteOrders,
       telegramRevenue,
+      whatsappRevenue,
       websiteRevenue,
       totalTickets,
       openTickets,
@@ -60,9 +62,14 @@ export async function getDashboard(req, res, next) {
         take: 5,
       }),
       prisma.order.count({ where: { userId, source: 'TELEGRAM' } }),
+      prisma.order.count({ where: { userId, source: 'WHATSAPP' } }),
       prisma.order.count({ where: { userId, source: 'WEBSITE' } }),
       prisma.order.aggregate({
         where: { userId, source: 'TELEGRAM', status: 'COMPLETED' },
+        _sum: { totalPrice: true },
+      }),
+      prisma.order.aggregate({
+        where: { userId, source: 'WHATSAPP', status: 'COMPLETED' },
         _sum: { totalPrice: true },
       }),
       prisma.order.aggregate({
@@ -88,10 +95,12 @@ export async function getDashboard(req, res, next) {
       recentOrders,
       ordersBySource: {
         TELEGRAM: telegramOrders,
+        WHATSAPP: whatsappOrders,
         WEBSITE: websiteOrders,
       },
       revenueBySource: {
         TELEGRAM: telegramRevenue._sum.totalPrice ?? 0,
+        WHATSAPP: whatsappRevenue._sum.totalPrice ?? 0,
         WEBSITE: websiteRevenue._sum.totalPrice ?? 0,
       },
       tickets: {

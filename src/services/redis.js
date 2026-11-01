@@ -61,6 +61,29 @@ export async function redisDel(...keys) {
   await c.del(...keys)
 }
 
+// Hapus lock hanya bila pemegangnya masih sama, agar drainer lama tidak
+// menghapus lock yang sudah direbut proses lain setelah TTL kedaluwarsa.
+const RELEASE_LOCK_LUA =
+  "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
+
+export async function redisReleaseLock(key, token) {
+  const c = getRedisClient()
+  const result = await c.eval(RELEASE_LOCK_LUA, 1, key, String(token))
+  return result === 1
+}
+
+// Perpanjang TTL hanya kalau lock masih milik kita. Tanpa cek token, drainer
+// yang telat bangun bisa menghidupkan kembali lock yang sudah direbut tenant
+// lain dan dua pemrosesan jalan berbarengan.
+const REFRESH_LOCK_LUA =
+  "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end"
+
+export async function redisRefreshLock(key, token, ttl) {
+  const c = getRedisClient()
+  const result = await c.eval(REFRESH_LOCK_LUA, 1, key, String(token), String(ttl))
+  return result === 1
+}
+
 export async function redisLpush(key, value) {
   const c = getRedisClient()
   const serialized = typeof value === 'object' ? JSON.stringify(value) : String(value)
@@ -97,6 +120,14 @@ export async function redisRpop(key) {
   const raw = await c.rpop(key)
   if (raw === null) return null
   try { return JSON.parse(raw) } catch { return raw }
+}
+
+// Sisi berlawanan dari redisRpop: mengembalikan pesan ke ujung antrian supaya
+// urutan konsumsinya tetap sama (LPUSH akan menaruhnya paling belakang).
+export async function redisRpush(key, value) {
+  const c = getRedisClient()
+  const serialized = typeof value === 'object' ? JSON.stringify(value) : String(value)
+  return c.rpush(key, serialized)
 }
 
 export async function redisSadd(key, value) {
@@ -155,5 +186,3 @@ export async function redisQuit() {
     client = null
   }
 }
-
-export default { getRedisClient, redisSet, redisGet, redisDel, redisLpush, redisRpop, redisLrange, redisLtrim, redisIncr, redisSetNx, redisExpire, redisKeys, redisPing, redisQuit }

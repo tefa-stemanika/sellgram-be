@@ -24,9 +24,6 @@ export async function enqueueFulfillment(orderId, userId) {
         orderId: order.id,
         userId,
         productId: item.productId,
-        orderOrderId: order.orderId,
-        telegramId: order.telegramId ? Number(order.telegramId) : null,
-        source: order.source,
       })
     }
   }

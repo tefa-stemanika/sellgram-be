@@ -57,6 +57,18 @@ Response:
 
 Simpan `token` dan kirim sebagai header untuk endpoint selanjutnya.
 
+### Format respons error
+
+```json
+{
+  "success": false,
+  "message": "Broadcast lewat WHATSAPP belum didukung. Kanal yang tersedia: TELEGRAM.",
+  "code": "channel_not_supported"
+}
+```
+
+`code` hanya dikirim untuk error yang punya status HTTP eksplisit (mis. `channel_not_supported`, `PLAN_LIMIT_EXCEEDED`, `FEATURE_NOT_ALLOWED`). Error tak terduga hanya mengirim `success` + `message`.
+
 ---
 
 ## Dashboard
@@ -81,30 +93,48 @@ Response:
     "totalOrders": 287,
     "pendingOrders": 8,
     "totalRevenue": 45850000,
-    "revenueChange": {
-      "percentage": 15.3,
-      "trend": "up"
-    },
+    "revenueGrowth": 15.3,
     "recentOrders": [
       {
         "id": "uuid-1",
-        "orderId": "INV-20240601-001",
+        "orderId": "ORD-20260601-1234",
+        "source": "TELEGRAM",
         "firstName": "Budi",
-        "username": "@budi123",
+        "username": "budi123",
+        "customerName": null,
+        "customerPhone": null,
         "status": "COMPLETED",
         "totalPrice": 150000,
         "createdAt": "2026-06-07T10:30:00.000Z"
       },
       {
         "id": "uuid-2",
-        "orderId": "INV-20240601-002",
+        "orderId": "ORD-20260601-5678",
+        "source": "WHATSAPP",
         "firstName": "Siti",
-        "username": "@siti456",
+        "username": null,
+        "customerName": "Siti Aminah",
+        "customerPhone": "6281234567890",
         "status": "PENDING",
         "totalPrice": 75000,
         "createdAt": "2026-06-07T09:15:00.000Z"
       }
-    ]
+    ],
+    "ordersBySource": {
+      "TELEGRAM": 200,
+      "WHATSAPP": 60,
+      "WEBSITE": 27
+    },
+    "revenueBySource": {
+      "TELEGRAM": 30000000,
+      "WHATSAPP": 12000000,
+      "WEBSITE": 3850000
+    },
+    "tickets": {
+      "total": 14,
+      "open": 5,
+      "closed": 9
+    }
   }
 }
 ```
@@ -113,13 +143,17 @@ Response:
 
 | Field | Type | Description |
 |---|---|---|
-| `activeProducts` | number | Jumlah produk dengan `isAvailable = true` |
+| `activeProducts` | number | Jumlah produk dengan `isAvailable = true` dan belum di-soft delete |
 | `totalOrders` | number | Total seluruh order (semua status) |
 | `pendingOrders` | number | Order dengan status `PENDING` + `PAYMENT_PENDING` |
-| `totalRevenue` | number | Total pendapatan dari order `COMPLETED` bulan ini |
-| `revenueChange.percentage` | number | Persentase perubahan revenue vs bulan lalu |
-| `revenueChange.trend` | string | `"up"` (>1%), `"down"` (<-1%), atau `"stable"` |
-| `recentOrders` | array | 5 order terbaru |
+| `totalRevenue` | number | Total pendapatan order `COMPLETED` bulan berjalan |
+| `revenueGrowth` | number | Persentase perubahan revenue vs bulan lalu (1 desimal); `100` bila bulan lalu nol dan bulan ini ada revenue |
+| `recentOrders` | array | 5 order terbaru. `username` hanya terisi untuk order Telegram; `customerName`/`customerPhone` dipakai order WhatsApp/Website — keduanya bisa `null`, jadi jangan andalkan satu field saja |
+| `ordersBySource` | object | Jumlah order per kanal: `TELEGRAM`, `WHATSAPP`, `WEBSITE` |
+| `revenueBySource` | object | Total revenue order `COMPLETED` per kanal (key sama dengan `ordersBySource`) |
+| `tickets.total` | number | Seluruh ticket tenant |
+| `tickets.open` | number | Ticket berstatus `OPEN`, `IN_PROGRESS`, atau `WAITING_CUSTOMER` |
+| `tickets.closed` | number | `total - open` |
 
 ---
 
@@ -300,16 +334,169 @@ curl -X GET "http://localhost:3000/api/bots/health?refresh=true" \
       "token": { "status": "ok", "botId": 123, "username": "toko_bot", "firstName": "Toko", "error": null },
       "webhook": { "status": "ok", "url": "https://app.example.com/api/webhook/telegram/uuid", "expectedUrl": "https://app.example.com/api/webhook/telegram/uuid", "pendingUpdateCount": 0, "lastErrorAt": null, "lastErrorMessage": null, "error": null },
       "runtime": { "active": true },
-      "activity": { "lastUpdateAt": "2026-10-30T09:58:12.000Z" }
+      "activity": { "lastUpdateAt": "2026-10-30T09:58:12.000Z" },
+      "whatsapp": { "status": "ok", "instance": "tenant-uuid", "instanceExists": true, "state": "open", "connected": true, "webhookSynced": true, "error": null }
     },
     "issues": []
   }
 }
 ```
 
-`status`: `healthy` | `degraded` (ada warning) | `unhealthy` (masalah kritis) | `unknown` (Telegram tidak dapat dihubungi). Kode issue kritis: `TOKEN_MISSING`, `TOKEN_INVALID`, `WEBHOOK_URL_MISSING`, `WEBHOOK_URL_INVALID`, `WEBHOOK_URL_MISMATCH`. Warning: `TELEGRAM_API_UNREACHABLE`, `CONFIG_UNAVAILABLE`, `WEBHOOK_LAST_ERROR_RECENT`, `WEBHOOK_PENDING_BACKLOG`, `WEBHOOK_CHECK_FAILED`, `BOT_NOT_SPAWNED`.
+`status`: `healthy` | `degraded` (ada warning) | `unhealthy` (masalah kritis) | `unknown` (Telegram tidak dapat dihubungi). Kode issue kritis: `TOKEN_MISSING`, `TOKEN_INVALID`, `WEBHOOK_URL_MISSING`, `WEBHOOK_URL_INVALID`, `WEBHOOK_URL_MISMATCH`, `WHATSAPP_WEBHOOK_NOT_SYNCED`. Warning: `TELEGRAM_API_UNREACHABLE`, `CONFIG_UNAVAILABLE`, `WEBHOOK_LAST_ERROR_RECENT`, `WEBHOOK_PENDING_BACKLOG`, `WEBHOOK_CHECK_FAILED`, `BOT_NOT_SPAWNED`, `WHATSAPP_NOT_CONNECTED`, `WHATSAPP_CHECK_FAILED`.
 
-Monitor background berjalan tiap `BOT_HEALTH_MONITOR_INTERVAL_MS` (default 5 menit, `<= 0` untuk mematikan) dan mencatat peringatan `[BotHealth]` di log saat status bot berubah.
+`checks.whatsapp.status`: `not_configured` (tenant tidak memakai WhatsApp atau instance belum dibuat — tidak memengaruhi `status` keseluruhan), `ok`, `disconnected`, `error`, `skipped`.
+
+Monitor background berjalan tiap `BOT_HEALTH_MONITOR_INTERVAL_MS` (default 5 menit, `<= 0` untuk mematikan) dan mencatat peringatan `[BotHealth]` di log saat status bot berubah. Sweep mencakup semua bot Telegram aktif **ditambah** tenant yang punya credential Evolution (langsung dicek walau bot Telegram-nya mati), sehingga instance WhatsApp yang logout ketahuan tanpa perlu membuka dashboard.
+
+### GET /api/bots/whatsapp/status
+
+Cek status instance WhatsApp di Evolution API dan konfigurasi webhook-nya. Membutuhkan credential `EVOLUTION_API_URL` dan `EVOLUTION_API_KEY` (per tenant atau fallback env). Nama instance selalu diturunkan backend dari `userId` (`tenant-<userId tanpa tanda baca>`) dan tidak dapat diatur lewat env maupun client.
+
+```bash
+curl -X GET http://localhost:3000/api/bots/whatsapp/status \
+  -H "Authorization: Bearer <token>"
+```
+
+```json
+{
+  "success": true,
+  "message": "Get WhatsApp status success",
+  "data": {
+    "userId": "uuid",
+    "configured": true,
+    "instance": "tenant-<uuid-tanpa-dash>",
+    "instanceExists": true,
+    "needsCreate": false,
+    "instanceLimit": 1,
+    "apiUrl": "https://evolution.example.com",
+    "state": "open",
+    "connected": true,
+    "webhook": {
+      "url": "https://app.example.com/api/webhook/whatsapp/uuid",
+      "enabled": true,
+      "events": ["MESSAGES_UPSERT"],
+      "expectedUrl": "https://app.example.com/api/webhook/whatsapp/uuid",
+      "synced": true
+    },
+    "errors": []
+  }
+}
+```
+
+`instance` selalu turunan `userId` dan dikelola backend — tenant tidak bisa mengganti nama instance. `instanceExists: false` / `needsCreate: true` berarti instance belum ada di server Evolution — panggil endpoint create instance. `webhook.synced: false` berarti webhook belum menunjuk ke endpoint tenant; panggil create/connect/restart untuk menyinkronkannya. `instanceLimit` selalu `1` (satu instance per user).
+
+### POST /api/bots/whatsapp/instance
+
+Membuat instance Evolution milik tenant (idempotent — instance yang sudah ada tidak dibuat ulang). Nama instance deterministik dan dikelola backend: `tenant-<userId tanpa tanda baca>`; nilainya tidak disimpan sebagai credential dan tidak dapat diatur tenant. Maksimal **1 instance per user**; bila terdeteksi lebih dari satu, endpoint mengembalikan `409 instance_limit_reached`.
+
+Webhook otomatis dipasang setelah instance berhasil dibuat/ditemukan, dengan URL berdasarkan userId: `${PUBLIC_BASE_URL}/api/webhook/whatsapp/:userId`, header `x-evolution-webhook-secret`, dan event `MESSAGES_UPSERT`. Bila webhook sudah sesuai, `/webhook/set` tidak dipanggil ulang (`action: "unchanged"`).
+
+```bash
+curl -X POST http://localhost:3000/api/bots/whatsapp/instance \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "number": "6281234567890" }'
+```
+
+Body opsional. `number` (8-15 digit) membuat Evolution menampilkan pairing code sebagai alternatif scan QR.
+
+```json
+{
+  "success": true,
+  "message": "Instance WhatsApp berhasil dibuat",
+  "data": {
+    "userId": "uuid",
+    "created": true,
+    "instance": "tenant-<uuid-tanpa-dash>",
+    "instanceLimit": 1,
+    "apiUrl": "https://evolution.example.com",
+    "state": "connecting",
+    "connected": false,
+    "qr": { "base64": "data:image/png;base64,...", "code": "2@...", "pairingCode": null, "count": 1 },
+    "webhook": {
+      "success": true,
+      "action": "created",
+      "webhookUrl": "https://app.example.com/api/webhook/whatsapp/uuid",
+      "events": ["MESSAGES_UPSERT"]
+    }
+  }
+}
+```
+
+`webhook.action`: `created` | `updated` | `unchanged`. Status HTTP `201` saat instance baru dibuat, `200` saat sudah ada.
+
+### GET /api/bots/whatsapp/connect
+
+Ambil QR / pairing code untuk menghubungkan WhatsApp seperti WhatsApp Web. Response Evolution dinormalisasi ke field `base64`, `code`, `pairingCode`, dan `count`. Webhook tenant juga dipastikan terpasang (idempotent) saat connect.
+
+```bash
+curl -X GET "http://localhost:3000/api/bots/whatsapp/connect?number=6281234567890" \
+  -H "Authorization: Bearer <token>"
+```
+
+Query `number` opsional. Bila instance sudah terhubung (`state: "open"`), QR tidak dikembalikan.
+
+```json
+{
+  "success": true,
+  "message": "QR WhatsApp berhasil dibuat, silakan scan",
+  "data": {
+    "userId": "uuid",
+    "instance": "tenant-<uuid-tanpa-dash>",
+    "state": "connecting",
+    "connected": false,
+    "base64": "data:image/png;base64,...",
+    "code": "2@...",
+    "pairingCode": null,
+    "count": 1,
+    "webhook": {
+      "success": true,
+      "action": "unchanged",
+      "webhookUrl": "https://app.example.com/api/webhook/whatsapp/uuid"
+    }
+  }
+}
+```
+
+Kode error: `instance_missing` (404 — panggil create instance dulu), `invalid_number` (400), `connect_failed` (502/503).
+
+### POST /api/bots/whatsapp/restart
+
+Restart instance Evolution, paksa set ulang webhook ke `PUBLIC_BASE_URL`, lalu kembalikan status terbaru. Gunakan bila instance bermasalah, QR tidak muncul, atau webhook perlu disinkronkan ulang. `POST /api/bots/whatsapp/reconnect` tetap tersedia sebagai alias endpoint ini.
+
+```bash
+curl -X POST http://localhost:3000/api/bots/whatsapp/restart \
+  -H "Authorization: Bearer <token>"
+```
+
+Response berisi `restarted`, `restartError`, `webhookUrl`, `webhook` (dengan `action: "updated"`), dan objek `status` (bentuk sama dengan GET status).
+
+`success` hanya `true` bila restart **dan** sinkronisasi webhook sama-sama berhasil. Kode error: `restart_failed` (Evolution menolak restart — HTTP 502, atau 503 bila timeout/unreachable), `webhook_failed` (restart jalan tapi webhook tidak terpasang), `instance_missing` (404, instance belum dibuat), `not_configured` (400).
+
+#### Perintah bot WhatsApp
+
+Bot hanya membaca pesan teks. Menu produk ditampilkan sebagai daftar bernomor; nomor atau nama produk yang diketik dipilih langsung.
+
+| Perintah | Alternatif tanpa slash | Catatan |
+|---|---|---|
+| `/start` | `start`, `mulai` | Greeting + menu; di-dedup 24 jam per chat (`welcome_sent:{userId}:{chatId}`) agar link click-to-chat tidak mengirim menu berulang |
+| `/menu` | `menu` | Membatalkan order berjalan lalu menampilkan menu |
+| `/pesan` | `pesan`, `order` | Mulai order baru |
+| `/batal` | `batal`, `cancel` | Batalkan order berjalan |
+| `/status` | `status` | Status order berjalan |
+| `/help` | `help`, `bantuan` | Daftar perintah |
+| `/konfirmasi` (atau `/confirm`) | — | **Wajib slash.** Membuat order + link pembayaran Midtrans |
+| `/reset` | — | **Wajib slash.** Hapus riwayat percakapan |
+
+Perintah yang menyentuh uang atau menghapus sesi sengaja tidak menerima bentuk kata biasa, supaya kalimat seperti "bayar nanti" atau "reset dulu" tidak memicu aksi. Nomor 1–99 untuk memilih produk/jumlah tetap diproses sesuai state sesi.
+
+Saat `/konfirmasi`, harga & ketersediaan produk dibaca ulang dari database; bila berubah sejak ringkasan, pelanggan diberi tahu total barunya. Kalau Midtrans gagal setelah order tersimpan, order ditandai `PAYMENT_FAILED` dan sesi di-reset supaya retry tidak menghasilkan order duplikat.
+
+Jika pesan masuk memakai JID `@lid`, backend memetakan ke nomor telepon; bila tidak bisa dipetakan, order tetap dibuat dengan `whatsappId` berupa `@lid` dan tanpa `customerPhone` (notifikasi ke nomor itu bisa gagal di Evolution < 2.3.x).
+
+Webhook WhatsApp: `POST /api/webhook/whatsapp/:userId` (tanpa JWT, wajib header `x-evolution-webhook-secret`). Hanya event `messages.upsert` yang diproses.
+
+Jika `key.remoteJid` berakhiran `@lid`, backend memetakan ke nomor telepon lewat `key.remoteJidAlt`/`key.senderPn`/`key.participantAlt` (tersedia di Evolution >= 2.3.x). Untuk Evolution 2.2.x yang belum mengirim field tersebut, backend memakai fallback kontak dengan `profilePicUrl` identik dan kandidat tunggal; balasan selalu dikirim ke JID telepon bila pemetaan berhasil. Pemetaan di-cache di Redis (`whatsapp_lid:{userId}:{lid}`).
 
 ---
 
@@ -568,3 +755,15 @@ Response:
 | `FREE` | Gratis |
 | `STARTER` | Starter |
 | `PRO` | Pro |
+
+## Batasan yang Diketahui
+
+| Area | Batasan | Perilaku backend |
+|---|---|---|
+| Broadcast WhatsApp/email | Belum diimplementasikan | `POST /api/broadcasts`, `POST /api/broadcasts/from-template`, `PATCH /api/broadcasts/:id` (bila mengirim `channel`), dan `POST /api/broadcasts/:id/send` menolak dengan HTTP 400 `code: "channel_not_supported"`. Hanya `TELEGRAM` yang didukung. |
+| Stok vs pembayaran | Pesanan dibuat sebelum pembayaran selesai | `validateStock` dicek saat konfirmasi, tapi stok tetap bisa oversold bila ada pemesanan paralel sebelum salah satu lunas. Pengurangan stok final terjadi pada webhook pembayaran. |
+| Pemetaan `@lid` | Butuh Evolution API >= 2.3.x | Pada Evolution 2.2.x, `key.remoteJidAlt` tidak dikirim. Backend mencoba fallback mencocokkan kontak lewat `pushName` + `profilePicUrl`; bila ambigu, order tetap memakai JID `@lid` dan nomor telepon tidak dapat dipulihkan. |
+| Secret webhook WhatsApp | Harus diisi di produksi | Bila `EVOLUTION_WEBHOOK_SECRET` tidak di-set, secret diturunkan dari `ENCRYPTION_KEY`. Mengubah `ENCRYPTION_KEY` mengubah seluruh secret webhook tenant. |
+| `ENCRYPTION_KEY` | Tidak boleh berubah setelah kredensial terenkripsi | Kredensial `bot_credentials` dienkripsi AES-256-GCM dengan key ini. Rotasi membuat kredensial lama tidak terbaca. |
+| Skema database | Deploy pakai `prisma db push` | Tidak ada `prisma/migrations/`. Perubahan schema diterapkan saat container start, jadi migrasi manual/rollback tidak tersedia. |
+| Instance WhatsApp per tenant | Maksimal satu | Nama instance selalu diturunkan backend dari `userId` (`tenant-<uuid>`); klien tidak bisa memilih nama instance. |

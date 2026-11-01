@@ -4,12 +4,20 @@ export function errorHandler(err, req, res, next) {
   }
 
   const statusCode = err.statusCode || 500
-  const message = err.message || 'Internal Server Error'
+  const rawMessage = err.message || ''
 
-  console.error('[API Error]', message)
+  console.error('[API Error]', rawMessage)
 
-  res.status(statusCode).json({
+  const body = {
     success: false,
-    message,
-  })
+    // Pesan error 5xx sering memuat detail Prisma atau URL upstream (termasuk
+    // nama instance Evolution); hanya error 4xx yang boleh dikirim apa adanya.
+    message:
+      statusCode < 500 && rawMessage ? rawMessage : 'Terjadi kesalahan pada server',
+  }
+  if (err.statusCode && typeof err.code === 'string') {
+    body.code = err.code
+  }
+
+  return res.status(statusCode).json(body)
 }

@@ -1,4 +1,5 @@
 import prisma from './db.js'
+import { extractPhoneFromJid } from './whatsappJid.js'
 
 function resolveIdentifier(userId, { telegramId, phone, email }) {
   if (telegramId)
@@ -16,10 +17,20 @@ function validateIdentifier({ telegramId, phone, email }) {
   }
 }
 
+/**
+ * Pembeli WhatsApp kadang hanya punya JID (nomor disembunyikan WhatsApp atau
+ * order dibuat sebelum kolom HP diisi). Nomor dari JID dipakai supaya tetap
+ * tercatat sebagai Customer dan bisa dihubungi.
+ */
+function resolveCustomerPhone(order) {
+  const direct = String(order.customerPhone || '').trim()
+  if (direct) return direct
+  return extractPhoneFromJid(order.whatsappId)
+}
+
 export async function upsertCustomerFromOrder(order, userId) {
   const {
     telegramId,
-    customerPhone,
     customerName,
     firstName,
     username,
@@ -27,24 +38,31 @@ export async function upsertCustomerFromOrder(order, userId) {
     createdAt,
   } = order
 
+  const phone = resolveCustomerPhone(order)
+
   const identifier = resolveIdentifier(userId, {
     telegramId,
-    phone: customerPhone,
+    phone,
   })
 
-  if (!identifier) return null
+  if (!identifier) {
+    console.warn(
+      `[Customer] Order ${order.orderId} (source ${order.source}) tanpa telegramId/phone/JID yang bisa dipakai — customer dilewati`,
+    )
+    return null
+  }
 
   const customer = await prisma.customer.upsert({
     where: identifier,
     create: {
       userId,
       telegramId: telegramId ? BigInt(telegramId) : null,
-      phone: customerPhone ?? null,
+      phone: phone ?? null,
       name: customerName ?? firstName ?? null,
       username: username ?? null,
       source: 'ORDER',
       hasTelegram: !!telegramId,
-      hasWhatsapp: !!customerPhone,
+      hasWhatsapp: Boolean(phone),
       firstOrderAt: createdAt,
       lastOrderAt: createdAt,
       totalOrders: 1,
@@ -54,7 +72,7 @@ export async function upsertCustomerFromOrder(order, userId) {
       ...(customerName || firstName ? { name: customerName ?? firstName } : {}),
       ...(username ? { username } : {}),
       ...(telegramId ? { hasTelegram: true } : {}),
-      ...(customerPhone ? { hasWhatsapp: true } : {}),
+      ...(phone ? { hasWhatsapp: true } : {}),
       lastOrderAt: createdAt,
       totalOrders: { increment: 1 },
       totalSpent: { increment: totalPrice },
@@ -91,7 +109,7 @@ export async function getCustomers(userId, filters = {}) {
     'name',
   ]
   const ALLOWED_SOURCE = ['ORDER', 'MANUAL', 'IMPORT']
-  const ALLOWED_ORDER_SOURCE = ['TELEGRAM', 'WEBSITE', 'API']
+  const ALLOWED_ORDER_SOURCE = ['TELEGRAM', 'WHATSAPP', 'WEBSITE', 'API']
   const safeSortBy = ALLOWED_SORT.includes(sortBy) ? sortBy : 'createdAt'
   const safeSortDir = sortDir === 'asc' ? 'asc' : 'desc'
   const safeSource = ALLOWED_SOURCE.includes(source) ? source : undefined
