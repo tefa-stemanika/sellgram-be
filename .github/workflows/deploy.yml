@@ -25,16 +25,26 @@ jobs:
         run: npm ci --no-audit --no-fund
 
       - name: Package
-        run: tar --exclude=.git --exclude=.github -czf release.tar.gz . || true
+        run: |
+          tar --warning=no-file-changed --exclude=.git --exclude=.github -czf release.tar.gz . || [ -s release.tar.gz ]
 
       - name: Publish release asset
         run: |
-          gh release create "deploy-${GITHUB_SHA}" release.tar.gz \
-            --title "deploy ${GITHUB_SHA}" --notes "auto deploy" --target "${GITHUB_SHA}" || true
+          gh release view "deploy-${GITHUB_SHA}" >/dev/null 2>&1 \
+            || gh release create "deploy-${GITHUB_SHA}" release.tar.gz \
+              --title "deploy ${GITHUB_SHA}" --notes "auto deploy" --target "${GITHUB_SHA}"
+
+      - name: Trigger deploy webhook
+        run: |
+          RESP=$(curl -sS --max-time 120 -X POST "${{ secrets.DEPLOY_URL }}" \
+            -H "X-Deploy-Token: ${{ secrets.DEPLOY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"sha\":\"${GITHUB_SHA}\"}")
+          echo "$RESP"
+          echo "$RESP" | grep -q "DEPLOY_OK"
 
       - name: Prune old releases (keep 5)
         if: always()
         run: |
-          gh release list --limit 100 --json tagName --jq '.[].tagName' \
-            | grep '^deploy-' | tail -n +6 \
-            | xargs -r -I{} gh release delete {} --cleanup-tag -y || true
+          gh release list -L 100 | awk '{print $1}' | grep '^deploy-' \
+            | tail -n +6 | xargs -r -I{} gh release delete {} --cleanup-tag -y || true
