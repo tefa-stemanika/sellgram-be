@@ -1,4 +1,17 @@
-name: Build and Deploy (LXC)
+name: Build and Deploy (GHCR + webhook)
+
+# Fase 6 — SELLGRAM-LXC-DOCKER-MIGRATION
+#
+# Alur:
+#   1. build image linux/amd64 dari Dockerfile repo ini
+#   2. push ke GHCR: ghcr.io/<owner>/<repo>:sha-<full sha>  +  :latest
+#   3. panggil webhook di lxc-6 (adnanh) -> /opt/deploy/deploy.sh be
+#      lxc-6 yang melakukan `docker compose pull` + `up -d` + health check 40 s
+#      + rollback ke tag sebelumnya bila gagal. Balasan harus memuat DEPLOY_OK.
+#
+# Build TIDAK dilakukan di lxc-6 (RAM host hanya 3,8 GiB — lihat T10).
+# Rahasia runtime (`JWT_SECRET`, `ENCRYPTION_KEY`, dst.) tetap di `.env.backend`
+# di lxc-6 dan TIDAK ikut ke image. Image ini hanya berisi kode + node_modules.
 
 on:
   push:
@@ -6,45 +19,70 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  packages: write
+
+# Jangan pernah dua deploy BE berjalan bersamaan (webhook pun punya flock).
+concurrency:
+  group: deploy-be-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/tefa-stemanika/sellgram-be
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login ke GHCR
+        uses: docker/login-action@v3
         with:
-          node-version: 22
-          cache: npm
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+      - name: Build dan push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha,scope=sellgram-be
+          cache-to: type=gha,mode=max,scope=sellgram-be
 
-      - name: Package
+      - name: Trigger deploy webhook (lxc-6)
+        env:
+          DEPLOY_URL: ${{ secrets.DEPLOY_URL }}
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
         run: |
-          tar --warning=no-file-changed --exclude=.git --exclude=.github -czf release.tar.gz . || [ -s release.tar.gz ]
-
-      - name: Publish release asset
-        run: |
-          gh release view "deploy-${GITHUB_SHA}" >/dev/null 2>&1 \
-            || gh release create "deploy-${GITHUB_SHA}" release.tar.gz \
-              --title "deploy ${GITHUB_SHA}" --notes "auto deploy" --target "${GITHUB_SHA}"
-
-      - name: Trigger deploy webhook
-        run: |
-          RESP=$(curl -sS --max-time 120 -X POST "${{ secrets.DEPLOY_URL }}" \
-            -H "X-Deploy-Token: ${{ secrets.DEPLOY_TOKEN }}" \
+          if [ -z "$DEPLOY_URL" ] || [ -z "$DEPLOY_TOKEN" ]; then
+            echo "::error::Secret DEPLOY_URL / DEPLOY_TOKEN belum diisi di repo ini."
+            exit 1
+          fi
+          RESP=$(curl -sS --max-time 300 -X POST "$DEPLOY_URL" \
+            -H "X-Deploy-Token: $DEPLOY_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"sha\":\"${GITHUB_SHA}\"}")
+            -d "{\"service\":\"be\",\"sha\":\"${GITHUB_SHA}\"}")
           echo "$RESP"
           echo "$RESP" | grep -q "DEPLOY_OK"
 
-      - name: Prune old releases (keep 5)
+      - name: Ringkasan
         if: always()
         run: |
-          gh release list -L 100 | awk '{print $1}' | grep '^deploy-' \
-            | tail -n +6 | xargs -r -I{} gh release delete {} --cleanup-tag -y || true
+          {
+            echo "### Deploy BE"
+            echo "- Image: \`${IMAGE}:sha-${GITHUB_SHA}\`"
+            echo "- Platform: \`linux/amd64\`"
+            echo "- Service: \`be\`"
+            echo "- Status job: \`${{ job.status }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
