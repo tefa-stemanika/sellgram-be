@@ -5,9 +5,12 @@ name: Build and Deploy (GHCR + webhook)
 # Alur:
 #   1. build image linux/amd64 dari Dockerfile repo ini
 #   2. push ke GHCR: ghcr.io/<owner>/<repo>:sha-<full sha>  +  :latest
-#   3. panggil webhook di lxc-6 (adnanh) -> /opt/deploy/deploy.sh be
-#      lxc-6 yang melakukan `docker compose pull` + `up -d` + health check 40 s
-#      + rollback ke tag sebelumnya bila gagal. Balasan harus memuat DEPLOY_OK.
+#   3. POST /hooks/deploy-be  -> deploy-start.sh di lxc-6 langsung balas
+#      DEPLOY_STARTED dan menjalankan deploy.sh di background (pull + up -d +
+#      health check 40 s + rollback). Deploy TIDAK ditahan di request HTTP:
+#      Cloudflare memutus request tanpa output pada ~62 s (curl exit 56).
+#   4. polling POST /hooks/status-be tiap 5 s (maks 8 menit) sampai
+#      STATE=DEPLOY_OK dengan TAG=sha-<commit ini, atau STATE=DEPLOY_FAILED.
 #
 # Build TIDAK dilakukan di lxc-6 (RAM host hanya 3,8 GiB — lihat T10).
 # Rahasia runtime (`JWT_SECRET`, `ENCRYPTION_KEY`, dst.) tetap di `.env.backend`
@@ -60,21 +63,58 @@ jobs:
           cache-from: type=gha,scope=sellgram-be
           cache-to: type=gha,mode=max,scope=sellgram-be
 
-      - name: Trigger deploy webhook (lxc-6)
+      - name: Trigger deploy (lxc-6)
         env:
           DEPLOY_URL: ${{ secrets.DEPLOY_URL }}
           DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          SERVICE: be
         run: |
+          set -uo pipefail
           if [ -z "$DEPLOY_URL" ] || [ -z "$DEPLOY_TOKEN" ]; then
             echo "::error::Secret DEPLOY_URL / DEPLOY_TOKEN belum diisi di repo ini."
             exit 1
           fi
-          RESP=$(curl -sS --max-time 300 -X POST "$DEPLOY_URL" \
-            -H "X-Deploy-Token: $DEPLOY_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"service\":\"be\",\"sha\":\"${GITHUB_SHA}\"}")
-          echo "$RESP"
-          echo "$RESP" | grep -q "DEPLOY_OK"
+          # Hook status dipasang bersaudara dengan hook deploy pada host yang sama.
+          BASE="${DEPLOY_URL%/hooks/*}"
+          STATUS_URL="$BASE/hooks/status-$SERVICE"
+
+          post() {
+            curl -sS --max-time 30 -X POST "$1" \
+              -H "X-Deploy-Token: $DEPLOY_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"service\":\"$SERVICE\",\"sha\":\"${GITHUB_SHA}\"}"
+          }
+
+          # Deploy dijalankan asynchronous di lxc-6 (pull image bisa >60 s tanpa
+          # output; Cloudflare memutus request menggantung ~62 s -> curl exit 56).
+          START=$(post "$DEPLOY_URL" || true)
+          echo "respons hook deploy: $START"
+          if ! echo "$START" | grep -q "DEPLOY_STARTED"; then
+            echo "::error::Webhook deploy tidak menerima permintaan (lihat respons di atas)."
+            exit 1
+          fi
+
+          # Pantau hook status: 96 x 5 s = 8 menit (cukup untuk pull 509 MB + health 40 s).
+          for i in $(seq 1 96); do
+            sleep 5
+            S=$(post "$STATUS_URL" || true)
+            echo "--- status ${i}/96 ---"
+            echo "$S"
+            if echo "$S" | grep -q "^STATE=DEPLOY_OK$"; then
+              if echo "$S" | grep -q "^TAG=sha-${GITHUB_SHA}$"; then
+                echo "::notice::Deploy ${SERVICE} sukses pada sha-${GITHUB_SHA}"
+                exit 0
+              fi
+              echo "::error::Status sukses milik tag lain, bukan sha-${GITHUB_SHA}."
+              exit 1
+            fi
+            if echo "$S" | grep -q "^STATE=DEPLOY_FAILED$"; then
+              echo "::error::Deploy ${SERVICE} gagal / di-rollback. Lihat /opt/deploy/deploy.log di lxc-6."
+              exit 1
+            fi
+          done
+          echo "::error::Timeout 8 menit menunggu status deploy ${SERVICE}."
+          exit 1
 
       - name: Ringkasan
         if: always()
